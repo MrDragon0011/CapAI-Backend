@@ -68,7 +68,8 @@ export function UploadZone({ onResult, onError, hasResult }: Props) {
       const form = new FormData();
       form.append("file", file);
       try {
-        const res = await fetch("http://localhost:8000/analyze", { method: "POST", body: form });
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+        const res = await fetch(`${apiUrl}/analyze`, { method: "POST", body: form });
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: res.statusText }));
           cancelAnimationFrame(rafRef.current);
