@@ -1,17 +1,21 @@
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
+import traceback
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from vision import extract_landmarks, OUTPUT_PATH as LANDMARKS_PATH
-from classifier import detect_action, MODEL_PATH as CLASSIFIER_MODEL_PATH
+from vision import extract_landmarks, OUTPUT_PATH as DEFAULT_LANDMARKS_PATH, MODEL_PATH as HOLISTIC_MODEL_PATH
+from classifier import detect_action, load_model, MODEL_PATH as CLASSIFIER_MODEL_PATH
 from analysis import analyse
+
+logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI()
 
@@ -29,6 +33,31 @@ app.add_middleware(
 PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT_SECONDS", "150"))
 MAX_LANDMARK_FRAMES = 200
 
+_classifier_artifact: dict | None = None
+
+
+@app.on_event("startup")
+def _preload_models():
+    global _classifier_artifact
+    if CLASSIFIER_MODEL_PATH.exists():
+        try:
+            _classifier_artifact = load_model()
+            logger.info("Classifier model loaded at startup.")
+        except Exception as exc:
+            logger.warning(f"Could not preload classifier model: {exc}")
+    else:
+        logger.warning(f"Classifier model not found at {CLASSIFIER_MODEL_PATH}; will fail at request time.")
+
+    if not HOLISTIC_MODEL_PATH.exists():
+        logger.warning(f"Holistic landmark model not found at {HOLISTIC_MODEL_PATH}.")
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception(request: Request, exc: Exception):
+    detail = f"{type(exc).__name__}: {exc}"
+    logger.error(f"Unhandled exception on {request.method} {request.url}\n{traceback.format_exc()}")
+    return JSONResponse(status_code=500, content={"detail": detail})
+
 
 @app.get("/")
 def read_root():
@@ -38,18 +67,22 @@ def read_root():
 @app.get("/health")
 def health():
     issues = []
-    from vision import MODEL_PATH as HOLISTIC_MODEL_PATH
     if not HOLISTIC_MODEL_PATH.exists():
-        issues.append(f"Missing holistic_landmarker.task at {HOLISTIC_MODEL_PATH}")
+        issues.append(
+            f"Missing holistic_landmarker.task at {HOLISTIC_MODEL_PATH}. "
+            "Download from the MediaPipe model repository and place in the backend directory."
+        )
     if not CLASSIFIER_MODEL_PATH.exists():
-        issues.append(f"Missing classifier_model.joblib at {CLASSIFIER_MODEL_PATH}")
+        issues.append(
+            f"Missing classifier_model.joblib at {CLASSIFIER_MODEL_PATH}. "
+            "Run classifier.train() with labelled data to generate it."
+        )
     return {"status": "ok" if not issues else "degraded", "issues": issues}
 
 
-async def _run_pipeline(tmp_path: str):
-    loop = asyncio.get_event_loop()
+async def _run_pipeline(tmp_video: str, landmarks_path: str):
+    loop = asyncio.get_running_loop()
 
-    from vision import MODEL_PATH as HOLISTIC_MODEL_PATH
     if not HOLISTIC_MODEL_PATH.exists():
         raise HTTPException(
             status_code=503,
@@ -61,13 +94,14 @@ async def _run_pipeline(tmp_path: str):
         )
 
     try:
-        await loop.run_in_executor(None, extract_landmarks, tmp_path)
+        await loop.run_in_executor(None, extract_landmarks, tmp_video, landmarks_path)
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Landmark extraction failed: {e}")
+        logger.error(f"Landmark extraction failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=422, detail=f"Landmark extraction failed: {type(e).__name__}: {e}")
 
-    if not CLASSIFIER_MODEL_PATH.exists():
+    if _classifier_artifact is None and not CLASSIFIER_MODEL_PATH.exists():
         raise HTTPException(
             status_code=503,
             detail=(
@@ -77,18 +111,29 @@ async def _run_pipeline(tmp_path: str):
         )
 
     try:
-        action = await loop.run_in_executor(None, detect_action, str(LANDMARKS_PATH))
+        action = await loop.run_in_executor(
+            None,
+            lambda: detect_action(
+                sequence_path=landmarks_path,
+                artifact=_classifier_artifact,
+            ),
+        )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Action classification failed: {e}")
+        logger.error(f"Action classification failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=422, detail=f"Action classification failed: {type(e).__name__}: {e}")
 
     try:
-        result = await loop.run_in_executor(None, analyse, action, str(LANDMARKS_PATH))
+        result = await loop.run_in_executor(
+            None,
+            lambda: analyse(action, landmarks_path),
+        )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Biomechanical analysis failed: {e}")
+        logger.error(f"Biomechanical analysis failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=422, detail=f"Biomechanical analysis failed: {type(e).__name__}: {e}")
 
     return action, result
 
@@ -96,14 +141,23 @@ async def _run_pipeline(tmp_path: str):
 @app.post("/analyze")
 async def analyze_video(file: UploadFile = File(...)):
     suffix = Path(file.filename).suffix if file.filename else ".mp4"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    tmp_video = str(tmp_dir / f"upload{suffix}")
+    landmarks_path = str(tmp_dir / "landmarks.json")
+
+    try:
+        loop = asyncio.get_running_loop()
+        raw = await file.read()
+        await loop.run_in_executor(None, lambda: Path(tmp_video).write_bytes(raw))
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=422, detail=f"Failed to save uploaded file: {e}")
 
     try:
         try:
             action, result = await asyncio.wait_for(
-                _run_pipeline(tmp_path),
+                _run_pipeline(tmp_video, landmarks_path),
                 timeout=PIPELINE_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -115,15 +169,15 @@ async def analyze_video(file: UploadFile = File(...)):
                 ),
             )
     finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     try:
-        with open(LANDMARKS_PATH) as f:
+        with open(DEFAULT_LANDMARKS_PATH) as f:
             seq_data = json.load(f)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read landmark data: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to read landmark data: {type(e).__name__}: {e}")
 
-    all_frames = [fr for fr in seq_data["frames"][::3] if fr.get("pose_landmarks")]
+    all_frames = [fr for fr in seq_data["frames"] if fr.get("pose_landmarks")]
     sampled = all_frames[:MAX_LANDMARK_FRAMES]
 
     landmarks_payload = {

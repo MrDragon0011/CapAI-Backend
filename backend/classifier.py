@@ -138,8 +138,17 @@ def train(training_data: list[tuple[str, str]], model_save_path: str = None):
     return pipeline, le
 
 
-def detect_action(sequence_path: str = None, model_path: str = None) -> str:
-    artifact = joblib.load(Path(model_path) if model_path else MODEL_PATH)
+def load_model(model_path: str | None = None) -> dict:
+    return joblib.load(Path(model_path) if model_path else MODEL_PATH)
+
+
+def detect_action(
+    sequence_path: str | None = None,
+    model_path: str | None = None,
+    artifact: dict | None = None,
+) -> str:
+    if artifact is None:
+        artifact = load_model(model_path)
     pipeline = artifact["pipeline"]
     le = artifact["label_encoder"]
 
