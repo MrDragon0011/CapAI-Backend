@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from vision import extract_landmarks, OUTPUT_PATH as DEFAULT_LANDMARKS_PATH, MODEL_PATH as HOLISTIC_MODEL_PATH
+from vision import extract_landmarks, MODEL_PATH as HOLISTIC_MODEL_PATH
 from classifier import detect_action, load_model, MODEL_PATH as CLASSIFIER_MODEL_PATH
 from analysis import analyse
 
@@ -150,11 +150,7 @@ async def analyze_video(file: UploadFile = File(...)):
         loop = asyncio.get_running_loop()
         raw = await file.read()
         await loop.run_in_executor(None, lambda: Path(tmp_video).write_bytes(raw))
-    except Exception as e:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise HTTPException(status_code=422, detail=f"Failed to save uploaded file: {e}")
 
-    try:
         try:
             action, result = await asyncio.wait_for(
                 _run_pipeline(tmp_video, landmarks_path),
@@ -168,14 +164,18 @@ async def analyze_video(file: UploadFile = File(...)):
                     "Try uploading a shorter clip (under 30 seconds)."
                 ),
             )
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    try:
-        with open(DEFAULT_LANDMARKS_PATH) as f:
-            seq_data = json.load(f)
+        try:
+            with open(landmarks_path) as f:
+                seq_data = json.load(f)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read landmark data: {type(e).__name__}: {e}")
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read landmark data: {type(e).__name__}: {e}")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
     all_frames = [fr for fr in seq_data["frames"] if fr.get("pose_landmarks")]
     sampled = all_frames[:MAX_LANDMARK_FRAMES]
