@@ -11,6 +11,16 @@ export interface Metric {
   feedback: string;
 }
 
+export interface PoseFrame {
+  t: number;
+  lm: [number, number, number][];
+}
+
+export interface LandmarkSequence {
+  fps: number;
+  frames: PoseFrame[];
+}
+
 export interface AnalysisResult {
   action: ActionType;
   label: string;
@@ -18,4 +28,5 @@ export interface AnalysisResult {
   priority_focus: string;
   total_frames_analysed: number;
   metrics: Metric[];
+  landmarks: LandmarkSequence;
 }

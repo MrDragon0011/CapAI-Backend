@@ -1,8 +1,10 @@
+import json
 import shutil
 import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from vision import extract_landmarks, OUTPUT_PATH as LANDMARKS_PATH
@@ -10,6 +12,14 @@ from classifier import detect_action
 from analysis import analyse
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
@@ -41,6 +51,25 @@ async def analyze_video(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Biomechanical analysis failed: {e}")
 
+    with open(LANDMARKS_PATH) as f:
+        seq_data = json.load(f)
+
+    sampled = seq_data["frames"][::3]
+    landmarks_payload = {
+        "fps": seq_data["fps"],
+        "frames": [
+            {
+                "t": fr["timestamp_ms"],
+                "lm": [
+                    [lm["x"], lm["y"], lm.get("visibility") or 1.0]
+                    for lm in fr["pose_landmarks"]
+                ],
+            }
+            for fr in sampled
+            if fr.get("pose_landmarks")
+        ],
+    }
+
     return JSONResponse(content={
         "action": result["action"],
         "label": result["label"],
@@ -48,4 +77,5 @@ async def analyze_video(file: UploadFile = File(...)):
         "priority_focus": result["priority_focus"],
         "total_frames_analysed": result["total_frames_analysed"],
         "metrics": result["metrics"],
+        "landmarks": landmarks_payload,
     })
