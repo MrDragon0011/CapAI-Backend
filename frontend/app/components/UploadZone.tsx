@@ -19,32 +19,69 @@ const STAGES = [
 ];
 
 const SPEEDS = [0.8, 0.4, 0.35, 0.25, 0.05];
+const FETCH_TIMEOUT_MS = 180_000;
+
+function classifyFetchError(err: unknown, status?: number): string {
+  if (status === 413) return "Video file is too large. Please upload a shorter clip (under 100 MB).";
+  if (status === 502 || status === 503 || status === 504)
+    return "The analysis server is starting up or temporarily unavailable. Please try again in 30 seconds.";
+  if (err instanceof DOMException && err.name === "AbortError")
+    return "Analysis timed out (the server took over 3 minutes). Try uploading a shorter clip.";
+  if (err instanceof TypeError && err.message.toLowerCase().includes("fetch"))
+    return "Could not reach the analysis server. Check that the backend is deployed and CORS is configured correctly.";
+  if (err instanceof SyntaxError)
+    return "The server returned an unexpected response. This usually means the response was too large or the server crashed mid-analysis.";
+  return "An unexpected error occurred. Please try again.";
+}
 
 export function UploadZone({ onResult, onError, hasResult }: Props) {
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
+
   const progressRef = useRef(0);
   const rafRef = useRef<number>(0);
+  const cancelledRef = useRef(false);
   const doneRef = useRef(false);
   const resultRef = useRef<{ data: AnalysisResult; videoUrl: string } | null>(null);
+  const onResultRef = useRef(onResult);
+  const onErrorRef = useRef(onError);
+
+  useEffect(() => { onResultRef.current = onResult; }, [onResult]);
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
 
   const currentStage = STAGES.findIndex((s) => progressRef.current < s.target);
   const activeStage = currentStage === -1 ? STAGES.length - 1 : currentStage;
 
+  const stopProgress = useCallback((resetTo0 = true) => {
+    cancelledRef.current = true;
+    cancelAnimationFrame(rafRef.current);
+    if (resetTo0) {
+      progressRef.current = 0;
+      setProgress(0);
+    }
+    setLoading(false);
+  }, []);
+
   const advanceProgress = useCallback(() => {
+    if (cancelledRef.current) return;
+
     const stage = STAGES.findIndex((s) => progressRef.current < s.target);
     if (stage === -1) {
       if (doneRef.current && resultRef.current) {
         setProgress(100);
         setTimeout(() => {
-          setLoading(false);
-          onResult(resultRef.current!.data, resultRef.current!.videoUrl);
-          progressRef.current = 0;
-          setProgress(0);
+          const payload = resultRef.current;
           doneRef.current = false;
           resultRef.current = null;
-        }, 400);
+          cancelledRef.current = true;
+          setLoading(false);
+          setProgress(0);
+          progressRef.current = 0;
+          if (payload) {
+            onResultRef.current(payload.data, payload.videoUrl);
+          }
+        }, 350);
       } else {
         rafRef.current = requestAnimationFrame(advanceProgress);
       }
@@ -53,47 +90,73 @@ export function UploadZone({ onResult, onError, hasResult }: Props) {
     progressRef.current = Math.min(progressRef.current + SPEEDS[stage], STAGES[stage].target);
     setProgress(Math.floor(progressRef.current));
     rafRef.current = requestAnimationFrame(advanceProgress);
-  }, [onResult]);
+  }, []);
 
-  const submit = useCallback(
-    async (file: File) => {
-      const videoUrl = URL.createObjectURL(file);
-      doneRef.current = false;
-      resultRef.current = null;
-      progressRef.current = 0;
-      setProgress(0);
-      setLoading(true);
-      rafRef.current = requestAnimationFrame(advanceProgress);
+  const submit = useCallback(async (file: File) => {
+    const videoUrl = URL.createObjectURL(file);
 
-      const form = new FormData();
-      form.append("file", file);
-      try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-        const res = await fetch(`${apiUrl}/analyze`, { method: "POST", body: form });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: res.statusText }));
-          cancelAnimationFrame(rafRef.current);
-          setLoading(false);
-          progressRef.current = 0;
-          setProgress(0);
-          onError(err.detail ?? "Request failed");
-        } else {
-          const data = await res.json();
-          resultRef.current = { data, videoUrl };
-          doneRef.current = true;
+    cancelledRef.current = false;
+    doneRef.current = false;
+    resultRef.current = null;
+    progressRef.current = 0;
+    setProgress(0);
+    setLoading(true);
+    rafRef.current = requestAnimationFrame(advanceProgress);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+    const form = new FormData();
+    form.append("file", file);
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+      const res = await fetch(`${apiUrl}/analyze`, {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        let detail = `Server error ${res.status}`;
+        try {
+          const body = await res.json();
+          detail = body?.detail ?? detail;
+        } catch {
+          try {
+            const text = await res.text();
+            if (text.length < 300) detail = text;
+          } catch { }
         }
-      } catch {
-        cancelAnimationFrame(rafRef.current);
-        setLoading(false);
-        progressRef.current = 0;
-        setProgress(0);
-        onError("Could not reach the backend. Make sure it is running on port 8000.");
+        stopProgress();
+        onErrorRef.current(classifyFetchError(null, res.status) + (detail ? ` (${detail})` : ""));
+        return;
       }
-    },
-    [advanceProgress, onError]
-  );
 
-  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+      let data: AnalysisResult;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        stopProgress();
+        onErrorRef.current(classifyFetchError(parseErr));
+        return;
+      }
+
+      resultRef.current = { data, videoUrl };
+      doneRef.current = true;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      stopProgress();
+      onErrorRef.current(classifyFetchError(err));
+    }
+  }, [advanceProgress, stopProgress]);
+
+  useEffect(() => () => {
+    cancelledRef.current = true;
+    cancelAnimationFrame(rafRef.current);
+  }, []);
 
   const handleFiles = (files: FileList | null) => {
     if (files?.[0]) submit(files[0]);
