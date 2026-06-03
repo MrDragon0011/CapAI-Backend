@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -22,30 +23,40 @@ def _landmark_to_dict(lm):
 def extract_landmarks(video_path: str, output_path: str | None = None) -> None:
     out = Path(output_path) if output_path else OUTPUT_PATH
 
+    t_model = time.monotonic()
     base_options = mp_python.BaseOptions(model_asset_path=str(MODEL_PATH))
     options = mp_vision.HolisticLandmarkerOptions(
         base_options=base_options,
         running_mode=mp_vision.RunningMode.VIDEO,
     )
+    print(f"[vision] Model options created in {time.monotonic()-t_model:.2f}s", flush=True)
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print(f"[vision] Video opened: fps={fps:.1f} total_frames={total_video_frames}", flush=True)
+
     landmarks_sequence = []
     frame_index = 0
     processed = 0
 
+    t_proc = time.monotonic()
     with mp_vision.HolisticLandmarker.create_from_options(options) as landmarker:
+        print(f"[vision] Landmarker created in {time.monotonic()-t_proc:.2f}s", flush=True)
+
         while processed < MAX_FRAMES:
+            if frame_index % FRAME_SAMPLE_RATE != 0:
+                if not cap.grab():
+                    break
+                frame_index += 1
+                continue
+
             ret, frame = cap.read()
             if not ret:
                 break
-
-            if frame_index % FRAME_SAMPLE_RATE != 0:
-                frame_index += 1
-                continue
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -65,12 +76,16 @@ def extract_landmarks(video_path: str, output_path: str | None = None) -> None:
             frame_index += 1
             processed += 1
 
+            if processed % 50 == 0:
+                elapsed = time.monotonic() - t_proc
+                print(f"[vision] Processed {processed} frames in {elapsed:.1f}s ({processed/elapsed:.1f} fps)", flush=True)
+
     cap.release()
 
+    t_write = time.monotonic()
     with open(out, "w") as f:
         json.dump({"fps": fps, "total_frames": processed, "frames": landmarks_sequence}, f)
-
-    print(f"Saved {processed} frames to {out}")
+    print(f"[vision] Saved {processed} frames to {out} in {time.monotonic()-t_write:.2f}s", flush=True)
 
 
 if __name__ == "__main__":
