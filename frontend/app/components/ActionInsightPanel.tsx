@@ -47,7 +47,8 @@ function TopMetric({ metric, index }: { metric: Metric; index: number }) {
       initial={{ opacity: 0, x: 12 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ delay: 0.2 + index * 0.08 }}
-      className="flex items-center justify-between gap-3 py-3 border-b border-white/[0.05] last:border-0"
+      className="flex items-center justify-between gap-3 py-3 border-b last:border-0"
+      style={{ borderColor: "var(--border)" }}
     >
       <div className="min-w-0">
         <p className="text-[12px] text-white/60 truncate">{metric.description}</p>
@@ -88,65 +89,41 @@ export function ActionInsightPanel({ result }: Props) {
         className="flex flex-col gap-4 h-full"
       >
         <div
-          className={`relative rounded-2xl overflow-hidden border border-white/[0.07] p-6 bg-gradient-to-br from-white/[0.05] to-transparent`}
+          className="p-5"
+          style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
         >
-          <div
-            className="absolute inset-0 pointer-events-none opacity-20"
-            style={{
-              background: `radial-gradient(ellipse 100% 100% at 100% 0%, rgba(${
-                action === "shooting"
-                  ? "249,115,22"
-                  : action === "passing"
-                  ? "56,189,248"
-                  : action === "swimming"
-                  ? "45,212,191"
-                  : "167,139,250"
-              },0.5) 0%, transparent 70%)`,
-            }}
-          />
-          <div className="relative z-10">
-            <div className="flex items-start justify-between mb-4">
-              <div
-                className={`w-12 h-12 rounded-xl bg-gradient-to-br ${cfg.color} flex items-center justify-center text-2xl shadow-lg ${cfg.glow}`}
-              >
-                {cfg.icon}
-              </div>
-              <div className="text-right">
-                <p className="text-[10px] uppercase tracking-widest text-white/30">Elite Score</p>
-                <p className="text-2xl font-bold text-white">{overall_elite_score_pct}%</p>
-              </div>
+          <div className="flex items-start justify-between mb-4">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-widest text-white/25 mb-1">
+                Action detected
+              </p>
+              <h3 className="text-xl font-black text-white tracking-tight">{label.toUpperCase()}</h3>
             </div>
-            <h3 className="text-xl font-bold text-white mb-1">{label}</h3>
-            <p className="text-[12px] text-white/40 leading-relaxed">{desc}</p>
+            <div className="text-right">
+              <p className="font-mono text-[10px] text-white/25 mb-1">Elite Score</p>
+              <p className="text-3xl font-black text-white">{overall_elite_score_pct}%</p>
+            </div>
           </div>
+          <p className="text-[12px] text-white/40 leading-relaxed">{desc}</p>
         </div>
 
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.15 }}
-          className="rounded-2xl border border-white/[0.07] bg-white/[0.03] backdrop-blur-xl p-5"
+          className="p-5"
+          style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
         >
-          <p className="text-[10px] uppercase tracking-widest text-white/25 mb-3">Body Focus</p>
+          <p className="font-mono text-[10px] uppercase tracking-widest text-white/25 mb-3">Body Focus</p>
           <div className="flex flex-wrap gap-2">
             {focus.map((tag, i) => (
               <motion.span
                 key={tag}
-                initial={{ opacity: 0, scale: 0.85 }}
-                animate={{ opacity: 1, scale: 1 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
                 transition={{ delay: 0.2 + i * 0.06 }}
-                className={`px-3 py-1 rounded-full text-[11px] font-medium border bg-gradient-to-r ${cfg.color} bg-clip-text text-transparent border-current`}
-                style={{
-                  borderColor: `rgba(${
-                    action === "shooting"
-                      ? "249,115,22"
-                      : action === "passing"
-                      ? "56,189,248"
-                      : action === "swimming"
-                      ? "45,212,191"
-                      : "167,139,250"
-                  },0.3)`,
-                }}
+                className="px-2.5 py-1 font-mono text-[10px] text-white/50"
+                style={{ border: "1px solid var(--border-strong)" }}
               >
                 {tag}
               </motion.span>
@@ -158,24 +135,12 @@ export function ActionInsightPanel({ result }: Props) {
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.2 }}
-          className="rounded-2xl border border-white/[0.07] bg-white/[0.03] backdrop-blur-xl p-5"
+          className="p-5"
+          style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
         >
-          <p className="text-[10px] uppercase tracking-widest text-white/25 mb-2">Critical Insight</p>
+          <p className="font-mono text-[10px] uppercase tracking-widest text-white/25 mb-2">Critical Insight</p>
           <div className="flex gap-3">
-            <div
-              className="shrink-0 w-0.5 rounded-full self-stretch"
-              style={{
-                background: `rgba(${
-                  action === "shooting"
-                    ? "249,115,22"
-                    : action === "passing"
-                    ? "56,189,248"
-                    : action === "swimming"
-                    ? "45,212,191"
-                    : "167,139,250"
-                },0.6)`,
-              }}
-            />
+            <div className="shrink-0 w-px self-stretch" style={{ background: "var(--accent)" }} />
             <p className="text-[13px] text-white/65 leading-relaxed">{priority_focus}</p>
           </div>
         </motion.div>
@@ -184,9 +149,10 @@ export function ActionInsightPanel({ result }: Props) {
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.25 }}
-          className="rounded-2xl border border-white/[0.07] bg-white/[0.03] backdrop-blur-xl p-5 flex-1"
+          className="p-5 flex-1"
+          style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
         >
-          <p className="text-[10px] uppercase tracking-widest text-white/25 mb-1">Key Metrics</p>
+          <p className="font-mono text-[10px] uppercase tracking-widest text-white/25 mb-1">Key Metrics</p>
           <div>
             {topMetrics.map((m, i) => (
               <TopMetric key={m.metric} metric={m} index={i} />
