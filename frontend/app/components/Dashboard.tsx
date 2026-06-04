@@ -17,16 +17,8 @@ export function Dashboard() {
   const action = result?.action as ActionType | undefined;
 
   return (
-    <div className="min-h-screen bg-[#080810] text-white font-sans">
-      <div
-        className="fixed inset-0 pointer-events-none"
-        style={{
-          background:
-            "radial-gradient(ellipse 80% 50% at 50% -10%, rgba(99,60,255,0.15) 0%, transparent 70%)",
-        }}
-      />
-
-      <div className="relative z-10 max-w-6xl mx-auto px-5 py-10">
+    <div className="min-h-screen text-white" style={{ background: "var(--bg)" }}>
+      <div className="max-w-6xl mx-auto px-5 pt-24 pb-16">
         <motion.div
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -65,7 +57,8 @@ export function Dashboard() {
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0 }}
-              className="mb-6 rounded-xl border border-rose-500/25 bg-rose-500/08 px-5 py-4 text-rose-300 text-sm"
+              className="mb-6 px-5 py-4 text-rose-300 text-sm font-mono"
+              style={{ border: "1px solid rgba(248,113,113,0.3)", background: "rgba(248,113,113,0.06)" }}
             >
               {error}
             </motion.div>
@@ -90,31 +83,28 @@ export function Dashboard() {
                 <ActionInsightPanel result={result} />
               </div>
 
-              <div className="flex items-center gap-3 mb-4">
-                <h3 className="text-[11px] font-semibold uppercase tracking-widest text-white/25">
+              <div className="flex items-center gap-4 mb-4 pt-2">
+                <div className="w-3 h-px" style={{ background: "var(--accent)" }} />
+                <h3 className="font-mono text-[10px] uppercase tracking-[0.25em] text-white/25">
                   Full Metric Breakdown
                 </h3>
-                <div className="flex-1 h-px bg-white/[0.05]" />
-                <div className="flex items-center gap-4 text-[10px]">
+                <div className="flex-1 h-px" style={{ background: "var(--border)" }} />
+                <div className="flex items-center gap-4 font-mono text-[10px]">
                   {(["elite", "below_elite", "above_elite"] as const).map((s) => (
                     <span
                       key={s}
                       className={`flex items-center gap-1.5 ${
-                        s === "elite"
-                          ? "text-emerald-400"
-                          : s === "below_elite"
-                          ? "text-amber-400"
-                          : "text-rose-400"
+                        s === "elite" ? "text-emerald-400" : s === "below_elite" ? "text-amber-400" : "text-rose-400"
                       }`}
                     >
-                      <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                      {s === "elite" ? "Elite" : s === "below_elite" ? "Below Elite" : "Above Elite"}
+                      <span className="w-1.5 h-1.5 bg-current" />
+                      {s === "elite" ? "Elite" : s === "below_elite" ? "Below" : "Above"}
                     </span>
                   ))}
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
                 {result.metrics.map((m, i) => (
                   <MetricCard key={m.metric} metric={m} index={i} />
                 ))}

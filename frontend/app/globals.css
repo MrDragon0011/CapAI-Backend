@@ -1,27 +1,21 @@
 @import "tailwindcss";
 
 :root {
-  --ocean-950: #020b14;
-  --ocean-900: #050f1c;
-  --ocean-800: #091827;
-  --ocean-700: #0d2236;
-  --ocean-600: #123048;
-  --ocean-500: #1a4a6e;
-  --ocean-400: #2a6fa8;
-  --ocean-300: #4d9fd6;
-  --ocean-200: #7ec3ea;
-  --ocean-100: #b8dff5;
-  --teal-accent: #00c8b4;
-  --cyan-accent: #22d3ee;
-  --pool-blue: #0e4d7a;
-  --pool-lane: rgba(255,255,255,0.08);
-  --background: var(--ocean-950);
-  --foreground: #f0f8ff;
+  --bg: #080808;
+  --surface: #111111;
+  --surface-2: #181818;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --accent: #00d4ff;
+  --accent-dim: rgba(0, 212, 255, 0.15);
+  --text: #f0f0f0;
+  --muted: rgba(255, 255, 255, 0.38);
+  --faint: rgba(255, 255, 255, 0.12);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -32,70 +26,51 @@
 
 html {
   scroll-behavior: smooth;
+  background: var(--bg);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--bg);
+  color: var(--text);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-.pool-surface {
-  background:
-    repeating-linear-gradient(
-      90deg,
-      transparent,
-      transparent calc(12.5% - 1px),
-      rgba(255,255,255,0.06) calc(12.5% - 1px),
-      rgba(255,255,255,0.06) 12.5%
-    ),
-    linear-gradient(180deg, #041e35 0%, #062d50 40%, #073762 60%, #041e35 100%);
+.grid-bg {
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 48px 48px;
 }
 
-.xray-skeleton {
-  mix-blend-mode: screen;
+.grid-bg-fine {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
 
-@keyframes lane-shimmer {
-  0% { opacity: 0.04; }
-  50% { opacity: 0.10; }
-  100% { opacity: 0.04; }
+@keyframes scan {
+  0% { transform: translateY(-8px); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateY(100%); opacity: 0; }
 }
 
-@keyframes pulse-joint {
-  0%, 100% { r: 3; opacity: 0.7; }
-  50% { r: 4.5; opacity: 1; }
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 
-@keyframes swim-bob {
-  0%, 100% { transform: translateY(0px) rotate(0deg); }
-  25% { transform: translateY(-4px) rotate(0.5deg); }
-  75% { transform: translateY(2px) rotate(-0.3deg); }
+@keyframes swim-cycle {
+  0%, 100% { transform: translateX(0) scaleX(1); }
+  50% { transform: translateX(6px) scaleX(1.02); }
 }
 
-@keyframes zoom-in-out {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.06); }
+.animate-scan {
+  animation: scan 3.5s ease-in-out infinite;
 }
 
-@keyframes scan-line {
-  0% { transform: translateY(-100%); }
-  100% { transform: translateY(100vh); }
-}
-
-.animate-swim-bob {
-  animation: swim-bob 3.5s ease-in-out infinite;
-}
-
-.animate-zoom-pulse {
-  animation: zoom-in-out 4s ease-in-out infinite;
-}
-
-.animate-lane-shimmer {
-  animation: lane-shimmer 3s ease-in-out infinite;
-}
-
-.magnifier-ring {
-  box-shadow: 0 0 0 2px rgba(0,200,180,0.6), 0 0 30px rgba(0,200,180,0.15), inset 0 0 40px rgba(0,0,0,0.5);
+.animate-blink {
+  animation: blink 1.2s step-end infinite;
 }

@@ -159,10 +159,11 @@ export function SkeletonOverlay({ videoUrl, landmarks, action }: Props) {
 
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.5 }}
-      className="relative w-full rounded-2xl overflow-hidden border border-white/[0.07] bg-black"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.4 }}
+      className="relative w-full overflow-hidden bg-black"
+      style={{ border: "1px solid var(--border)" }}
     >
       <video
         ref={videoRef}
@@ -178,23 +179,21 @@ export function SkeletonOverlay({ videoUrl, landmarks, action }: Props) {
         style={{ width: "100%", height: "100%" }}
       />
       <div
-        className="absolute inset-0 pointer-events-none rounded-2xl"
+        className="absolute top-0 left-0 flex items-center gap-2 px-3 py-1.5"
         style={{
-          boxShadow: `inset 0 0 40px rgba(${ACTION_COLOR[action]},0.08)`,
+          background: "rgba(0,0,0,0.85)",
+          borderBottom: "1px solid var(--border)",
+          borderRight: "1px solid var(--border)",
         }}
-      />
-      <motion.div
-        initial={{ opacity: 0, y: 6 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.3 }}
-        className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/[0.08]"
       >
         <span
-          className="w-1.5 h-1.5 rounded-full animate-pulse"
-          style={{ backgroundColor: `rgba(${ACTION_COLOR[action]},0.9)` }}
+          className="w-1.5 h-1.5 animate-pulse"
+          style={{ background: `rgba(${ACTION_COLOR[action]},1)` }}
         />
-        <span className="text-[10px] uppercase tracking-widest text-white/60">Skeleton Overlay</span>
-      </motion.div>
+        <span className="font-mono text-[9px] uppercase tracking-widest text-white/50">
+          Skeleton Overlay
+        </span>
+      </div>
     </motion.div>
   );
 }

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 import traceback
@@ -38,23 +39,58 @@ UPLOAD_CHUNK = 1024 * 1024
 _classifier_artifact: dict | None = None
 
 
+def _try_download_holistic_model() -> bool:
+    if HOLISTIC_MODEL_PATH.exists():
+        return True
+    script = Path(__file__).parent / "download_models.sh"
+    if not script.exists():
+        return False
+    try:
+        logger.info("[startup] holistic_landmarker.task missing — running download_models.sh")
+        result = subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            logger.info(f"[startup] download_models.sh succeeded:\n{result.stdout.strip()}")
+            return HOLISTIC_MODEL_PATH.exists()
+        logger.error(f"[startup] download_models.sh failed (exit {result.returncode}):\n{result.stderr.strip()}")
+        return False
+    except Exception as exc:
+        logger.error(f"[startup] download_models.sh raised: {exc}")
+        return False
+
+
 @app.on_event("startup")
 def _preload_models():
     global _classifier_artifact
+
+    if _try_download_holistic_model():
+        logger.info(f"[startup] Holistic model ready at {HOLISTIC_MODEL_PATH}")
+    else:
+        logger.error(
+            "[startup] holistic_landmarker.task not found and could not be downloaded. "
+            "Place the file in the backend directory or ensure download_models.sh can reach "
+            "storage.googleapis.com at build time. The /analyze endpoint will return 503."
+        )
+
     if CLASSIFIER_MODEL_PATH.exists():
         try:
             t0 = time.monotonic()
             _classifier_artifact = load_model()
             logger.info(f"[startup] Classifier model loaded in {time.monotonic()-t0:.2f}s")
         except Exception as exc:
-            logger.warning(f"[startup] Could not preload classifier model: {exc}")
+            logger.error(
+                f"[startup] classifier_model.joblib exists but failed to load: {exc}. "
+                "Re-generate it by running classifier.train() with labelled data."
+            )
     else:
-        logger.warning(f"[startup] Classifier model not found at {CLASSIFIER_MODEL_PATH}")
-
-    if not HOLISTIC_MODEL_PATH.exists():
-        logger.warning(f"[startup] Holistic landmark model not found at {HOLISTIC_MODEL_PATH}")
-    else:
-        logger.info(f"[startup] Holistic model present at {HOLISTIC_MODEL_PATH}")
+        logger.warning(
+            f"[startup] classifier_model.joblib not found at {CLASSIFIER_MODEL_PATH}. "
+            "The /analyze endpoint will return 503 until a trained model is present."
+        )
 
 
 @app.exception_handler(Exception)
@@ -74,18 +110,19 @@ def health():
     issues = []
     if not HOLISTIC_MODEL_PATH.exists():
         issues.append(
-            f"Missing holistic_landmarker.task at {HOLISTIC_MODEL_PATH}. "
-            "Download from the MediaPipe model repository and place in the backend directory."
+            f"holistic_landmarker.task not found at {HOLISTIC_MODEL_PATH}. "
+            "It is downloaded automatically at startup — check Render build logs."
         )
     if not CLASSIFIER_MODEL_PATH.exists():
         issues.append(
-            f"Missing classifier_model.joblib at {CLASSIFIER_MODEL_PATH}. "
-            "Run classifier.train() with labelled data to generate it."
+            f"classifier_model.joblib not found at {CLASSIFIER_MODEL_PATH}. "
+            "Run classifier.train() with labelled landmark sequences to generate it."
         )
     return {
         "status": "ok" if not issues else "degraded",
         "issues": issues,
         "classifier_preloaded": _classifier_artifact is not None,
+        "holistic_model_present": HOLISTIC_MODEL_PATH.exists(),
     }
 
 
@@ -108,9 +145,9 @@ async def _run_pipeline(tmp_video: str, landmarks_path: str, req_id: str):
         raise HTTPException(
             status_code=503,
             detail=(
-                f"Holistic landmark model not found at {HOLISTIC_MODEL_PATH}. "
-                "Download holistic_landmarker.task from the MediaPipe model repository "
-                "and place it in the backend directory."
+                "holistic_landmarker.task is missing on the server. "
+                "The model is downloaded automatically at startup — check Render build logs. "
+                "You can also manually place the file in the backend directory."
             ),
         )
 
@@ -172,7 +209,16 @@ async def _run_pipeline(tmp_video: str, landmarks_path: str, req_id: str):
 async def analyze_video(file: UploadFile = File(...)):
     req_id = os.urandom(4).hex()
     suffix = Path(file.filename).suffix if file.filename else ".mp4"
-    logger.info(f"[{req_id}] /analyze received — filename={file.filename} content_type={file.content_type}")
+    content_type = file.content_type or ""
+    logger.info(
+        f"[{req_id}] /analyze — filename={file.filename!r} "
+        f"content_type={content_type!r} suffix={suffix!r}"
+    )
+    if suffix.lower() not in {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported file extension {suffix!r}. Upload an MP4, MOV, or AVI clip.",
+        )
 
     tmp_dir = Path(tempfile.mkdtemp())
     tmp_video = str(tmp_dir / f"upload{suffix}")

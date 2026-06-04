@@ -164,7 +164,7 @@ export function UploadZone({ onResult, onError, hasResult }: Props) {
 
   if (loading) {
     return (
-      <div className="w-full rounded-2xl border border-white/[0.07] bg-white/[0.03] backdrop-blur-xl overflow-hidden">
+      <div className="w-full overflow-hidden" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
         <div className="px-8 py-6">
           <div className="flex items-center justify-between mb-5">
             <AnimatePresence mode="wait">
@@ -236,10 +236,10 @@ export function UploadZone({ onResult, onError, hasResult }: Props) {
       onDragLeave={() => setDragging(false)}
       onDrop={(e) => { e.preventDefault(); setDragging(false); handleFiles(e.dataTransfer.files); }}
       animate={{
-        borderColor: dragging ? "rgba(139,92,246,0.6)" : "rgba(255,255,255,0.07)",
-        backgroundColor: dragging ? "rgba(139,92,246,0.06)" : "rgba(255,255,255,0.02)",
+        borderColor: dragging ? "var(--accent)" : "var(--border)",
+        backgroundColor: dragging ? "rgba(0,212,255,0.04)" : "var(--bg)",
       }}
-      className={`relative flex flex-col items-center justify-center gap-4 w-full rounded-2xl border-2 border-dashed backdrop-blur-xl cursor-pointer transition-all ${
+      className={`relative flex flex-col items-center justify-center gap-4 w-full border-2 border-dashed cursor-pointer transition-all ${
         hasResult ? "py-5 px-8" : "py-14 px-8"
       }`}
     >
