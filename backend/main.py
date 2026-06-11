@@ -87,9 +87,10 @@ def _preload_models():
                 "Re-generate it by running classifier.train() with labelled data."
             )
     else:
-        logger.warning(
+        logger.info(
             f"[startup] classifier_model.joblib not found at {CLASSIFIER_MODEL_PATH}. "
-            "The /analyze endpoint will return 503 until a trained model is present."
+            "Falling back to rule-based action detection. Train a model with "
+            "classifier.train() for higher accuracy."
         )
 
 
@@ -108,20 +109,22 @@ def read_root():
 @app.get("/health")
 def health():
     issues = []
+    notes = []
     if not HOLISTIC_MODEL_PATH.exists():
         issues.append(
             f"holistic_landmarker.task not found at {HOLISTIC_MODEL_PATH}. "
             "It is downloaded automatically at startup — check Render build logs."
         )
     if not CLASSIFIER_MODEL_PATH.exists():
-        issues.append(
-            f"classifier_model.joblib not found at {CLASSIFIER_MODEL_PATH}. "
-            "Run classifier.train() with labelled landmark sequences to generate it."
+        notes.append(
+            "classifier_model.joblib not present — using rule-based action detection. "
+            "Train a model with classifier.train() for higher accuracy."
         )
     return {
         "status": "ok" if not issues else "degraded",
         "issues": issues,
-        "classifier_preloaded": _classifier_artifact is not None,
+        "notes": notes,
+        "classifier_mode": "ml" if _classifier_artifact is not None else "rule-based",
         "holistic_model_present": HOLISTIC_MODEL_PATH.exists(),
     }
 
@@ -162,16 +165,8 @@ async def _run_pipeline(tmp_video: str, landmarks_path: str, req_id: str):
         raise HTTPException(status_code=422, detail=f"Landmark extraction failed: {type(e).__name__}: {e}")
     logger.info(f"[{req_id}] Stage 1/3 done in {time.monotonic()-t0:.1f}s")
 
-    if _classifier_artifact is None and not CLASSIFIER_MODEL_PATH.exists():
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"Classifier model not found at {CLASSIFIER_MODEL_PATH}. "
-                "Run classifier.train() with labelled data to generate classifier_model.joblib."
-            ),
-        )
-
-    logger.info(f"[{req_id}] Stage 2/3: classifying action")
+    mode = "ml" if (_classifier_artifact is not None or CLASSIFIER_MODEL_PATH.exists()) else "rule-based"
+    logger.info(f"[{req_id}] Stage 2/3: classifying action (mode={mode})")
     t1 = time.monotonic()
     try:
         action = await loop.run_in_executor(

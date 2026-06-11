@@ -142,17 +142,72 @@ def load_model(model_path: str | None = None) -> dict:
     return joblib.load(Path(model_path) if model_path else MODEL_PATH)
 
 
+def _rule_based_detect(frames) -> str:
+    usable = [f for f in frames if f.get("pose_landmarks")]
+    if not usable:
+        return "swimming"
+
+    torso_verticality = []
+    both_wrists_high = []
+    rw_speeds = []
+    lw_speeds = []
+    prev_rw = None
+    prev_lw = None
+
+    for f in usable:
+        pose = f["pose_landmarks"]
+        ls = _lm_xyz(pose, POSE_KEYPOINTS["left_shoulder"])
+        rs = _lm_xyz(pose, POSE_KEYPOINTS["right_shoulder"])
+        lh = _lm_xyz(pose, POSE_KEYPOINTS["left_hip"])
+        rh = _lm_xyz(pose, POSE_KEYPOINTS["right_hip"])
+        lw = _lm_xyz(pose, POSE_KEYPOINTS["left_wrist"])
+        rw = _lm_xyz(pose, POSE_KEYPOINTS["right_wrist"])
+
+        mid_shoulder = (ls + rs) / 2
+        mid_hip = (lh + rh) / 2
+        torso = mid_shoulder - mid_hip
+        norm = float(np.linalg.norm(torso[:2])) + 1e-8
+        torso_verticality.append(abs(float(torso[1])) / norm)
+
+        both_wrists_high.append(rw[1] < rs[1] and lw[1] < ls[1])
+
+        if prev_rw is not None:
+            rw_speeds.append(float(np.linalg.norm(rw - prev_rw)))
+            lw_speeds.append(float(np.linalg.norm(lw - prev_lw)))
+        prev_rw, prev_lw = rw, lw
+
+    mean_verticality = float(np.mean(torso_verticality))
+    high_frac = float(np.mean(both_wrists_high))
+    peak_wrist_speed = max(max(rw_speeds, default=0.0), max(lw_speeds, default=0.0))
+    mean_rw = float(np.mean(rw_speeds)) if rw_speeds else 0.0
+    mean_lw = float(np.mean(lw_speeds)) if lw_speeds else 0.0
+    bilateral_balance = min(mean_rw, mean_lw) / (max(mean_rw, mean_lw) + 1e-8)
+
+    if mean_verticality < 0.55:
+        return "swimming"
+    if high_frac > 0.4:
+        return "goalie"
+    if peak_wrist_speed > 0.12 and bilateral_balance < 0.6:
+        return "shooting"
+    return "passing"
+
+
 def detect_action(
     sequence_path: str | None = None,
     model_path: str | None = None,
     artifact: dict | None = None,
 ) -> str:
+    frames = load_sequence(sequence_path)
+
     if artifact is None:
+        resolved = Path(model_path) if model_path else MODEL_PATH
+        if not resolved.exists():
+            return _rule_based_detect(frames)
         artifact = load_model(model_path)
+
     pipeline = artifact["pipeline"]
     le = artifact["label_encoder"]
 
-    frames = load_sequence(sequence_path)
     windows = _sliding_windows(frames)
     X = np.array([_sequence_features(w) for w in windows])
 
