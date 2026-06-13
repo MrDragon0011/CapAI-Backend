@@ -1,5 +1,6 @@
 fastapi
 uvicorn
-mediapipe
-scikit-learn
 python-multipart
+mediapipe
+opencv-python-headless
+numpy<2

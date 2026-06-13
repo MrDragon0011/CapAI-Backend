@@ -1,15 +1,7 @@
 services:
   - type: web
     name: capai-backend
-    env: python
-    buildCommand: "pip install -r requirements.txt && bash download_models.sh"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
-    envVars:
-      - key: CORS_ORIGINS
-        sync: false
-      - key: PIPELINE_TIMEOUT_SECONDS
-        value: "150"
-      - key: FRAME_SAMPLE_RATE
-        value: "3"
-      - key: MAX_FRAMES
-        value: "500"
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health

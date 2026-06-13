@@ -1,0 +1,5 @@
+venv/
+__pycache__/
+*.pyc
+pose_landmarker.task
+.pytest_cache/
