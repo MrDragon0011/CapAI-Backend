@@ -1,294 +1,293 @@
 import asyncio
-import json
 import logging
-import os
+import math
 import shutil
-import subprocess
 import tempfile
 import time
-import traceback
+import urllib.request
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+import cv2
+import numpy as np
+import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from vision import extract_landmarks, MODEL_PATH as HOLISTIC_MODEL_PATH
-from classifier import detect_action, load_model, MODEL_PATH as CLASSIFIER_MODEL_PATH
-from analysis import analyse
-
 logger = logging.getLogger("uvicorn.error")
 
-app = FastAPI()
-
-_raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000")
-_allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+app = FastAPI(title="CapAI Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=[
+        "https://cap-ai.netlify.app",
+        "http://localhost:8000",
+    ],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT_SECONDS", "150"))
-MAX_LANDMARK_FRAMES = 200
+MAX_BYTES = 200 * 1024 * 1024
 UPLOAD_CHUNK = 1024 * 1024
+SAMPLE_FPS = 3
+MAX_FRAMES = 60
 
-_classifier_artifact: dict | None = None
+IMAGE_EXT = {".jpg", ".jpeg", ".png"}
+VIDEO_EXT = {".mp4", ".mov"}
+
+TRACKED_THRESHOLD = 0.75
+PARTIAL_THRESHOLD = 0.30
+
+ANGLE_JOINTS = {
+    "elbow_l": (11, 13, 15),
+    "elbow_r": (12, 14, 16),
+    "knee_l": (23, 25, 27),
+    "knee_r": (24, 26, 28),
+}
+
+MODEL_PATH = Path(__file__).parent / "pose_landmarker.task"
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+    "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+)
 
 
-def _try_download_holistic_model() -> bool:
-    if HOLISTIC_MODEL_PATH.exists():
+def _ensure_model() -> bool:
+    if MODEL_PATH.exists():
         return True
-    script = Path(__file__).parent / "download_models.sh"
-    if not script.exists():
-        return False
     try:
-        logger.info("[startup] holistic_landmarker.task missing — running download_models.sh")
-        result = subprocess.run(
-            ["bash", str(script)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode == 0:
-            logger.info(f"[startup] download_models.sh succeeded:\n{result.stdout.strip()}")
-            return HOLISTIC_MODEL_PATH.exists()
-        logger.error(f"[startup] download_models.sh failed (exit {result.returncode}):\n{result.stderr.strip()}")
-        return False
+        logger.info("[startup] Downloading pose_landmarker.task ...")
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        logger.info(f"[startup] Pose model saved to {MODEL_PATH}")
+        return True
     except Exception as exc:
-        logger.error(f"[startup] download_models.sh raised: {exc}")
+        logger.error(f"[startup] Failed to download pose model: {exc}")
         return False
 
 
 @app.on_event("startup")
-def _preload_models():
-    global _classifier_artifact
-
-    if _try_download_holistic_model():
-        logger.info(f"[startup] Holistic model ready at {HOLISTIC_MODEL_PATH}")
-    else:
-        logger.error(
-            "[startup] holistic_landmarker.task not found and could not be downloaded. "
-            "Place the file in the backend directory or ensure download_models.sh can reach "
-            "storage.googleapis.com at build time. The /analyze endpoint will return 503."
-        )
-
-    if CLASSIFIER_MODEL_PATH.exists():
-        try:
-            t0 = time.monotonic()
-            _classifier_artifact = load_model()
-            logger.info(f"[startup] Classifier model loaded in {time.monotonic()-t0:.2f}s")
-        except Exception as exc:
-            logger.error(
-                f"[startup] classifier_model.joblib exists but failed to load: {exc}. "
-                "Re-generate it by running classifier.train() with labelled data."
-            )
-    else:
-        logger.info(
-            f"[startup] classifier_model.joblib not found at {CLASSIFIER_MODEL_PATH}. "
-            "Falling back to rule-based action detection. Train a model with "
-            "classifier.train() for higher accuracy."
-        )
+def _startup():
+    _ensure_model()
 
 
-@app.exception_handler(Exception)
-async def _unhandled_exception(request: Request, exc: Exception):
-    detail = f"{type(exc).__name__}: {exc}"
-    logger.error(f"[unhandled] {request.method} {request.url}\n{traceback.format_exc()}")
-    return JSONResponse(status_code=500, content={"detail": detail})
+def _error(message: str, status: int = 400):
+    return JSONResponse(status_code=status, content={"ok": False, "error": message})
+
+
+def _angle(a, b, c) -> float:
+    a = np.array(a, dtype=np.float64)
+    b = np.array(b, dtype=np.float64)
+    c = np.array(c, dtype=np.float64)
+    ba = a - b
+    bc = c - b
+    denom = (np.linalg.norm(ba) * np.linalg.norm(bc)) + 1e-9
+    cosine = np.dot(ba, bc) / denom
+    return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
+
+def _shoulder_tilt(lm, aspect: float) -> float:
+    dx = (lm[12].x - lm[11].x) * aspect
+    dy = lm[12].y - lm[11].y
+    tilt = math.degrees(math.atan2(dy, dx))
+    if tilt > 90:
+        tilt -= 180
+    elif tilt < -90:
+        tilt += 180
+    return tilt
+
+
+def _compute_kinematics(lm, aspect: float):
+    def point(i):
+        return (lm[i].x * aspect, lm[i].y)
+
+    angles = {}
+    for name, (a, b, c) in ANGLE_JOINTS.items():
+        angles[name] = round(_angle(point(a), point(b), point(c)), 1)
+    angles["shoulder_tilt"] = round(_shoulder_tilt(lm, aspect), 1)
+
+    tracked = partial = estimated = 0
+    for landmark in lm:
+        v = landmark.visibility
+        if v >= TRACKED_THRESHOLD:
+            tracked += 1
+        elif v >= PARTIAL_THRESHOLD:
+            partial += 1
+        else:
+            estimated += 1
+
+    visibility = {"tracked": tracked, "partial": partial, "estimated": estimated}
+    return angles, visibility
+
+
+def _landmarks_payload(lm):
+    return [[round(p.x, 4), round(p.y, 4), round(p.visibility, 4)] for p in lm]
+
+
+def _frame_result(pose_landmarks, width, height, index):
+    lm = pose_landmarks[0]
+    aspect = width / height if height else 1.0
+
+    t0 = time.perf_counter()
+    angles, visibility = _compute_kinematics(lm, aspect)
+    kinematics_ms = round((time.perf_counter() - t0) * 1000.0, 4)
+
+    return {
+        "index": index,
+        "landmarks": _landmarks_payload(lm),
+        "angles": angles,
+        "visibility": visibility,
+        "kinematics_ms": kinematics_ms,
+    }
+
+
+def _image_landmarker():
+    options = mp_vision.PoseLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
+        running_mode=mp_vision.RunningMode.IMAGE,
+        num_poses=1,
+    )
+    return mp_vision.PoseLandmarker.create_from_options(options)
+
+
+def _video_landmarker():
+    options = mp_vision.PoseLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
+        running_mode=mp_vision.RunningMode.VIDEO,
+        num_poses=1,
+    )
+    return mp_vision.PoseLandmarker.create_from_options(options)
+
+
+def _analyze_image(path, filename, content_type):
+    image = cv2.imread(path)
+    if image is None:
+        raise ValueError("Could not decode the uploaded image.")
+    height, width = image.shape[:2]
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    frames = []
+    with _image_landmarker() as landmarker:
+        result = landmarker.detect(mp_image)
+    if result.pose_landmarks:
+        frames.append(_frame_result(result.pose_landmarks, width, height, 0))
+
+    return _build_response(filename, content_type, width, height, frames)
+
+
+def _analyze_video(path, filename, content_type):
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise ValueError("Could not open the uploaded video.")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    sample_every = max(1, int(round(fps / SAMPLE_FPS)))
+
+    frames = []
+    frame_index = 0
+
+    with _video_landmarker() as landmarker:
+        while len(frames) < MAX_FRAMES:
+            if not cap.grab():
+                break
+            if frame_index % sample_every != 0:
+                frame_index += 1
+                continue
+            ok, image = cap.retrieve()
+            if not ok:
+                break
+            if width == 0 or height == 0:
+                height, width = image.shape[:2]
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            timestamp_ms = int((frame_index / fps) * 1000)
+            result = landmarker.detect_for_video(mp_image, timestamp_ms)
+            if result.pose_landmarks:
+                frames.append(_frame_result(result.pose_landmarks, width, height, frame_index))
+            frame_index += 1
+
+    cap.release()
+    return _build_response(filename, content_type, width, height, frames)
+
+
+def _build_response(filename, content_type, width, height, frames):
+    return {
+        "ok": True,
+        "source": {
+            "filename": filename,
+            "type": content_type,
+            "width": width,
+            "height": height,
+            "frames_analyzed": len(frames),
+        },
+        "frames": frames,
+    }
 
 
 @app.get("/")
-def read_root():
-    return {"message": "Hello from CapAI backend"}
+def root():
+    return {"service": "CapAI Backend", "status": "ok"}
 
 
 @app.get("/health")
 def health():
-    issues = []
-    notes = []
-    if not HOLISTIC_MODEL_PATH.exists():
-        issues.append(
-            f"holistic_landmarker.task not found at {HOLISTIC_MODEL_PATH}. "
-            "It is downloaded automatically at startup — check Render build logs."
-        )
-    if not CLASSIFIER_MODEL_PATH.exists():
-        notes.append(
-            "classifier_model.joblib not present — using rule-based action detection. "
-            "Train a model with classifier.train() for higher accuracy."
-        )
-    return {
-        "status": "ok" if not issues else "degraded",
-        "issues": issues,
-        "notes": notes,
-        "classifier_mode": "ml" if _classifier_artifact is not None else "rule-based",
-        "holistic_model_present": HOLISTIC_MODEL_PATH.exists(),
-    }
-
-
-def _stream_upload_to_disk(file_obj, dest: str) -> int:
-    written = 0
-    with open(dest, "wb") as out:
-        while True:
-            chunk = file_obj.read(UPLOAD_CHUNK)
-            if not chunk:
-                break
-            out.write(chunk)
-            written += len(chunk)
-    return written
-
-
-async def _run_pipeline(tmp_video: str, landmarks_path: str, req_id: str):
-    loop = asyncio.get_running_loop()
-
-    if not HOLISTIC_MODEL_PATH.exists():
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "holistic_landmarker.task is missing on the server. "
-                "The model is downloaded automatically at startup — check Render build logs. "
-                "You can also manually place the file in the backend directory."
-            ),
-        )
-
-    logger.info(f"[{req_id}] Stage 1/3: starting landmark extraction")
-    t0 = time.monotonic()
-    try:
-        await loop.run_in_executor(None, extract_landmarks, tmp_video, landmarks_path)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[{req_id}] Stage 1/3 FAILED after {time.monotonic()-t0:.1f}s:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=422, detail=f"Landmark extraction failed: {type(e).__name__}: {e}")
-    logger.info(f"[{req_id}] Stage 1/3 done in {time.monotonic()-t0:.1f}s")
-
-    mode = "ml" if (_classifier_artifact is not None or CLASSIFIER_MODEL_PATH.exists()) else "rule-based"
-    logger.info(f"[{req_id}] Stage 2/3: classifying action (mode={mode})")
-    t1 = time.monotonic()
-    try:
-        action = await loop.run_in_executor(
-            None,
-            lambda: detect_action(
-                sequence_path=landmarks_path,
-                artifact=_classifier_artifact,
-            ),
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[{req_id}] Stage 2/3 FAILED after {time.monotonic()-t1:.1f}s:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=422, detail=f"Action classification failed: {type(e).__name__}: {e}")
-    logger.info(f"[{req_id}] Stage 2/3 done in {time.monotonic()-t1:.1f}s — action={action}")
-
-    logger.info(f"[{req_id}] Stage 3/3: biomechanical analysis")
-    t2 = time.monotonic()
-    try:
-        result = await loop.run_in_executor(
-            None,
-            lambda: analyse(action, landmarks_path),
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[{req_id}] Stage 3/3 FAILED after {time.monotonic()-t2:.1f}s:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=422, detail=f"Biomechanical analysis failed: {type(e).__name__}: {e}")
-    logger.info(f"[{req_id}] Stage 3/3 done in {time.monotonic()-t2:.1f}s")
-
-    return action, result
+    return {"status": "ok"}
 
 
 @app.post("/analyze")
-async def analyze_video(file: UploadFile = File(...)):
-    req_id = os.urandom(4).hex()
-    suffix = Path(file.filename).suffix if file.filename else ".mp4"
-    content_type = file.content_type or ""
-    logger.info(
-        f"[{req_id}] /analyze — filename={file.filename!r} "
-        f"content_type={content_type!r} suffix={suffix!r}"
-    )
-    if suffix.lower() not in {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unsupported file extension {suffix!r}. Upload an MP4, MOV, or AVI clip.",
-        )
+async def analyze(
+    footage: UploadFile = File(...),
+    consent: str = Form(...),
+):
+    if consent != "accepted":
+        return _error("Consent was not accepted.")
 
-    tmp_dir = Path(tempfile.mkdtemp())
-    tmp_video = str(tmp_dir / f"upload{suffix}")
-    landmarks_path = str(tmp_dir / "landmarks.json")
+    filename = footage.filename or "upload"
+    suffix = Path(filename).suffix.lower()
+
+    if suffix in IMAGE_EXT:
+        is_video = False
+    elif suffix in VIDEO_EXT:
+        is_video = True
+    else:
+        return _error("Unsupported file type. Allowed: MP4, MOV, JPG, PNG.")
+
+    if not MODEL_PATH.exists() and not _ensure_model():
+        return _error("Pose model is unavailable on the server.", 503)
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="capai_"))
+    tmp_path = str(tmp_dir / f"footage{suffix}")
 
     try:
+        written = 0
+        with open(tmp_path, "wb") as out:
+            while True:
+                chunk = await footage.read(UPLOAD_CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_BYTES:
+                    return _error("File exceeds the 200 MB limit.")
+                out.write(chunk)
+
+        if written == 0:
+            return _error("Uploaded file is empty.")
+
         loop = asyncio.get_running_loop()
-
-        logger.info(f"[{req_id}] Streaming upload to disk (chunk={UPLOAD_CHUNK//1024}KB)")
-        t_upload = time.monotonic()
+        worker = _analyze_video if is_video else _analyze_image
+        content_type = footage.content_type or ""
         try:
-            bytes_written = await loop.run_in_executor(
-                None, _stream_upload_to_disk, file.file, tmp_video
+            result = await loop.run_in_executor(
+                None, worker, tmp_path, filename, content_type
             )
-        except Exception as e:
-            raise HTTPException(status_code=422, detail=f"Failed to save uploaded file: {type(e).__name__}: {e}")
-        logger.info(f"[{req_id}] Upload saved: {bytes_written/1024/1024:.2f} MB in {time.monotonic()-t_upload:.2f}s")
+        except ValueError as exc:
+            return _error(str(exc))
 
-        if bytes_written == 0:
-            raise HTTPException(status_code=422, detail="Uploaded file is empty.")
-
-        logger.info(f"[{req_id}] Starting pipeline (timeout={PIPELINE_TIMEOUT}s)")
-        t_pipeline = time.monotonic()
-        try:
-            action, result = await asyncio.wait_for(
-                _run_pipeline(tmp_video, landmarks_path, req_id),
-                timeout=PIPELINE_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.error(f"[{req_id}] Pipeline timed out after {time.monotonic()-t_pipeline:.1f}s")
-            raise HTTPException(
-                status_code=504,
-                detail=(
-                    f"Analysis exceeded the {PIPELINE_TIMEOUT}s time limit. "
-                    "Try uploading a shorter clip (under 30 seconds)."
-                ),
-            )
-        logger.info(f"[{req_id}] Pipeline complete in {time.monotonic()-t_pipeline:.1f}s")
-
-        try:
-            with open(landmarks_path) as f:
-                seq_data = json.load(f)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to read landmark data: {type(e).__name__}: {e}")
-
-    except Exception:
+        return JSONResponse(content=result)
+    finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
-
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    all_frames = [fr for fr in seq_data["frames"] if fr.get("pose_landmarks")]
-    sampled = all_frames[:MAX_LANDMARK_FRAMES]
-
-    landmarks_payload = {
-        "fps": seq_data["fps"],
-        "frames": [
-            {
-                "t": fr["timestamp_ms"],
-                "lm": [
-                    [lm["x"], lm["y"], lm.get("visibility") or 1.0]
-                    for lm in fr["pose_landmarks"]
-                ],
-            }
-            for fr in sampled
-        ],
-    }
-
-    logger.info(f"[{req_id}] Responding — frames={len(sampled)} action={action}")
-    return JSONResponse(content={
-        "action": result["action"],
-        "label": result["label"],
-        "overall_elite_score_pct": result["overall_elite_score_pct"],
-        "priority_focus": result["priority_focus"],
-        "total_frames_analysed": result["total_frames_analysed"],
-        "metrics": result["metrics"],
-        "landmarks": landmarks_payload,
-    })
