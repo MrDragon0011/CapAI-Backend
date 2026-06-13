@@ -35,8 +35,8 @@ UPLOAD_CHUNK = 1024 * 1024
 SAMPLE_FPS = 3
 MAX_FRAMES = 60
 
-IMAGE_EXT = {".jpg", ".jpeg", ".png"}
-VIDEO_EXT = {".mp4", ".mov"}
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".heic", ".heif"}
+VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".wmv", ".flv", ".3gp", ".ts"}
 
 TRACKED_THRESHOLD = 0.75
 PARTIAL_THRESHOLD = 0.30
@@ -255,7 +255,11 @@ async def analyze(
     elif suffix in VIDEO_EXT:
         is_video = True
     else:
-        return _error("Unsupported file type. Allowed: MP4, MOV, JPG, PNG.")
+        return _error(
+            "Unsupported file type. "
+            "Images: JPG, PNG, GIF, BMP, WEBP, TIFF, HEIC. "
+            "Videos: MP4, MOV, AVI, MKV, WEBM, M4V, WMV, FLV, 3GP."
+        )
 
     if not MODEL_PATH.exists() and not _ensure_model():
         return _error("Pose model is unavailable on the server.", 503)
