@@ -123,6 +123,7 @@ def _compute_kinematics(lm, aspect: float):
 
 
 def _landmarks_payload(lm):
+    # lm = result.pose_landmarks[0] — image-normalized (0..1), NOT world landmarks (metres)
     return [[round(p.x, 4), round(p.y, 4), round(p.visibility, 4)] for p in lm]
 
 
@@ -173,6 +174,9 @@ def _analyze_image(path, filename, content_type):
     with _image_landmarker() as landmarker:
         result = landmarker.detect(mp_image)
     if result.pose_landmarks:
+        # Use pose_landmarks (image-normalized 0..1), never pose_world_landmarks (metres)
+        lm0 = result.pose_landmarks[0]
+        logger.info("[image] landmark[0] x=%.4f y=%.4f (expect spread across 0..1)", lm0[0].x, lm0[0].y)
         frames.append(_frame_result(result.pose_landmarks, width, height, 0))
 
     return _build_response(filename, content_type, width, height, frames)
@@ -208,6 +212,10 @@ def _analyze_video(path, filename, content_type):
             timestamp_ms = int((frame_index / fps) * 1000)
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
             if result.pose_landmarks:
+                # Use pose_landmarks (image-normalized 0..1), never pose_world_landmarks (metres)
+                if len(frames) == 0:
+                    lm0 = result.pose_landmarks[0]
+                    logger.info("[video] landmark[0] x=%.4f y=%.4f (expect spread across 0..1)", lm0[0].x, lm0[0].y)
                 frames.append(_frame_result(result.pose_landmarks, width, height, frame_index))
             frame_index += 1
 
