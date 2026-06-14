@@ -51,8 +51,13 @@ ANGLE_JOINTS = {
 MODEL_PATH = Path(__file__).parent / "pose_landmarker.task"
 MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-    "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+    "pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
 )
+
+# Reject low-confidence detections so we don't emit a degenerate centre-clustered skeleton
+MIN_POSE_DETECTION_CONFIDENCE = 0.6
+MIN_POSE_PRESENCE_CONFIDENCE = 0.6
+MIN_TRACKING_CONFIDENCE = 0.6
 
 
 def _ensure_model() -> bool:
@@ -149,6 +154,8 @@ def _image_landmarker():
         base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
         running_mode=mp_vision.RunningMode.IMAGE,
         num_poses=1,
+        min_pose_detection_confidence=MIN_POSE_DETECTION_CONFIDENCE,
+        min_pose_presence_confidence=MIN_POSE_PRESENCE_CONFIDENCE,
     )
     return mp_vision.PoseLandmarker.create_from_options(options)
 
@@ -158,6 +165,9 @@ def _video_landmarker():
         base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
         running_mode=mp_vision.RunningMode.VIDEO,
         num_poses=1,
+        min_pose_detection_confidence=MIN_POSE_DETECTION_CONFIDENCE,
+        min_pose_presence_confidence=MIN_POSE_PRESENCE_CONFIDENCE,
+        min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
     )
     return mp_vision.PoseLandmarker.create_from_options(options)
 
