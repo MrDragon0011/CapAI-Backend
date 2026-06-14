@@ -58,6 +58,11 @@ ANGLE_JOINTS = {
     "knee_r": (24, 26, 28),
 }
 
+# Detect several candidates then lock onto the most prominent athlete
+NUM_POSES = 5
+# Pad the person crop before the high-res refinement pass (fraction of bbox)
+CROP_PAD = 0.25
+
 MODEL_PATH = Path(__file__).parent / "pose_landmarker.task"
 MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
@@ -172,13 +177,79 @@ def _detect_ball(bgr_image, width: int, height: int):
     return balls
 
 
+def _pose_score(lm):
+    """Rank a pose by prominence: bbox area weighted by mean visibility.
+
+    Picks the biggest, most-confident body in the frame so we lock onto the
+    athlete taking the shot instead of a distant/partial swimmer.
+    """
+    xs = [p.x for p in lm]
+    ys = [p.y for p in lm]
+    area = max(1e-6, (max(xs) - min(xs)) * (max(ys) - min(ys)))
+    mean_vis = sum(p.visibility for p in lm) / len(lm)
+    return area * mean_vis
+
+
+def _select_best_pose(pose_landmarks_list):
+    """Return the index of the most prominent athlete among detected poses."""
+    best_i, best_score = 0, -1.0
+    for i, lm in enumerate(pose_landmarks_list):
+        s = _pose_score(lm)
+        if s > best_score:
+            best_i, best_score = i, s
+    return best_i
+
+
+def _bbox_px(lm, width, height, pad):
+    """Padded pixel bounding box (x0, y0, x1, y1) around a pose."""
+    xs = [p.x for p in lm]
+    ys = [p.y for p in lm]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    px, py = (x1 - x0) * pad, (y1 - y0) * pad
+    x0 = int(max(0, (x0 - px) * width))
+    y0 = int(max(0, (y0 - py) * height))
+    x1 = int(min(1.0, (x1 + px)) * width)
+    y1 = int(min(1.0, (y1 + py)) * height)
+    return x0, y0, x1, y1
+
+
+def _refine_pose(landmarker, bgr_image, lm, width, height):
+    """Re-run pose on a crop around the athlete for higher landmark precision.
+
+    Returns (refined_landmarks, ok). Landmarks are remapped to full-frame
+    normalized coords. Falls back to the original pose if refinement fails.
+    """
+    x0, y0, x1, y1 = _bbox_px(lm, width, height, CROP_PAD)
+    cw, ch = x1 - x0, y1 - y0
+    # Skip if the athlete already fills most of the frame (nothing to gain)
+    if cw < 32 or ch < 32 or (cw * ch) >= 0.6 * width * height:
+        return lm, False
+
+    crop = bgr_image[y0:y1, x0:x1]
+    rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+    mp_crop = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    try:
+        res = landmarker.detect(mp_crop)
+    except Exception:
+        return lm, False
+    if not res.pose_landmarks:
+        return lm, False
+
+    refined = res.pose_landmarks[_select_best_pose(res.pose_landmarks)]
+    # Map crop-normalized landmarks back to full-frame normalized coords
+    for p in refined:
+        p.x = (x0 + p.x * cw) / width
+        p.y = (y0 + p.y * ch) / height
+    return refined, True
+
+
 def _landmarks_payload(lm):
     # lm = result.pose_landmarks[0] — image-normalized (0..1), NOT world landmarks (metres)
     return [[round(p.x, 4), round(p.y, 4), round(p.visibility, 4)] for p in lm]
 
 
-def _frame_result(pose_landmarks, width, height, index, bgr_image=None):
-    lm = pose_landmarks[0]
+def _frame_result(lm, width, height, index, bgr_image=None):
     aspect = width / height if height else 1.0
 
     t0 = time.perf_counter()
@@ -201,7 +272,7 @@ def _image_landmarker():
     options = mp_vision.PoseLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
         running_mode=mp_vision.RunningMode.IMAGE,
-        num_poses=1,
+        num_poses=NUM_POSES,
         min_pose_detection_confidence=MIN_POSE_DETECTION_CONFIDENCE,
         min_pose_presence_confidence=MIN_POSE_PRESENCE_CONFIDENCE,
     )
@@ -212,7 +283,7 @@ def _video_landmarker():
     options = mp_vision.PoseLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
         running_mode=mp_vision.RunningMode.VIDEO,
-        num_poses=1,
+        num_poses=NUM_POSES,
         min_pose_detection_confidence=MIN_POSE_DETECTION_CONFIDENCE,
         min_pose_presence_confidence=MIN_POSE_PRESENCE_CONFIDENCE,
         min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
@@ -231,11 +302,12 @@ def _analyze_image(path, filename, content_type):
     frames = []
     with _image_landmarker() as landmarker:
         result = landmarker.detect(mp_image)
-    if result.pose_landmarks:
-        # Use pose_landmarks (image-normalized 0..1), never pose_world_landmarks (metres)
-        lm0 = result.pose_landmarks[0]
-        logger.info("[image] landmark[0] x=%.4f y=%.4f (expect spread across 0..1)", lm0[0].x, lm0[0].y)
-        frames.append(_frame_result(result.pose_landmarks, width, height, 0, image))
+        if result.pose_landmarks:
+            # Lock onto the most prominent athlete, then refine on a crop
+            best = result.pose_landmarks[_select_best_pose(result.pose_landmarks)]
+            best, refined = _refine_pose(landmarker, image, best, width, height)
+            logger.info("[image] poses=%d refined=%s", len(result.pose_landmarks), refined)
+            frames.append(_frame_result(best, width, height, 0, image))
 
     return _build_response(filename, content_type, width, height, frames)
 
@@ -253,7 +325,7 @@ def _analyze_video(path, filename, content_type):
     frames = []
     frame_index = 0
 
-    with _video_landmarker() as landmarker:
+    with _video_landmarker() as landmarker, _image_landmarker() as refiner:
         while len(frames) < MAX_FRAMES:
             if not cap.grab():
                 break
@@ -270,11 +342,10 @@ def _analyze_video(path, filename, content_type):
             timestamp_ms = int((frame_index / fps) * 1000)
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
             if result.pose_landmarks:
-                # Use pose_landmarks (image-normalized 0..1), never pose_world_landmarks (metres)
-                if len(frames) == 0:
-                    lm0 = result.pose_landmarks[0]
-                    logger.info("[video] landmark[0] x=%.4f y=%.4f (expect spread across 0..1)", lm0[0].x, lm0[0].y)
-                frames.append(_frame_result(result.pose_landmarks, width, height, frame_index, image))
+                # Lock onto the most prominent athlete, then refine on a crop
+                best = result.pose_landmarks[_select_best_pose(result.pose_landmarks)]
+                best, _ = _refine_pose(refiner, image, best, width, height)
+                frames.append(_frame_result(best, width, height, frame_index, image))
             frame_index += 1
 
     cap.release()
