@@ -1,0 +1,7 @@
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = ".next" # The plugin will automatically manage the correct output
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
