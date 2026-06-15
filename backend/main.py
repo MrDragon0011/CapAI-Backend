@@ -51,6 +51,12 @@ BALL_MAX_AREA_FRAC = 0.08     # ignore huge yellow regions (lane gear, banners)
 BALL_MIN_CIRCULARITY = 0.65   # 1.0 = perfect circle; reject ragged splash blobs
 BALL_MAX_RESULTS = 1          # only the single best candidate
 
+# Trained YOLOv8 ball detector (preferred over the HSV colour heuristic).
+# Falls back to HSV automatically if the weights or ultralytics are missing.
+BALL_MODEL_PATH = Path(__file__).parent / "ball_detector.pt"
+BALL_CONF = 0.25              # min confidence for a YOLO ball detection
+_ball_model = None            # lazily loaded singleton; False = load failed
+
 ANGLE_JOINTS = {
     "elbow_l": (11, 13, 15),
     "elbow_r": (12, 14, 16),
@@ -119,6 +125,7 @@ def _ensure_model() -> bool:
 @app.on_event("startup")
 def _startup():
     _ensure_model()
+    _get_ball_model()  # warm the YOLO detector so the first request isn't slow
 
 
 def _error(message: str, status: int = 400):
@@ -170,7 +177,66 @@ def _compute_kinematics(lm, aspect: float):
     return angles, visibility
 
 
+def _get_ball_model():
+    """Lazily load the trained YOLO ball detector. Returns the model or None."""
+    global _ball_model
+    if _ball_model is None:
+        if not BALL_MODEL_PATH.exists():
+            logger.info("[ball] No ball_detector.pt; using HSV fallback.")
+            _ball_model = False
+        else:
+            try:
+                from ultralytics import YOLO
+                _ball_model = YOLO(str(BALL_MODEL_PATH))
+                logger.info("[ball] Loaded YOLO ball detector from %s", BALL_MODEL_PATH)
+            except Exception as exc:
+                logger.error("[ball] Failed to load YOLO model (%s); using HSV.", exc)
+                _ball_model = False
+    return _ball_model or None
+
+
+def _detect_ball_yolo(model, bgr_image, width: int, height: int):
+    """Run the trained YOLO detector and return up to BALL_MAX_RESULTS balls."""
+    res = model.predict(bgr_image, conf=BALL_CONF, verbose=False)[0]
+    boxes = getattr(res, "boxes", None)
+    if boxes is None or len(boxes) == 0:
+        return []
+
+    confs = boxes.conf.cpu().numpy()
+    xyxy = boxes.xyxy.cpu().numpy()
+    order = confs.argsort()[::-1][:BALL_MAX_RESULTS]
+
+    balls = []
+    max_wh = float(max(width, height))
+    for i in order:
+        x0, y0, x1, y1 = xyxy[i]
+        cx = (float(x0) + float(x1)) / 2.0
+        cy = (float(y0) + float(y1)) / 2.0
+        r = max(float(x1) - float(x0), float(y1) - float(y0)) / 2.0
+        balls.append({
+            "x": round(cx / width, 4),
+            "y": round(cy / height, 4),
+            "r": round(r / max_wh, 4),
+        })
+    return balls
+
+
 def _detect_ball(bgr_image, width: int, height: int):
+    """Detect the ball, preferring the trained YOLO model over HSV colour.
+
+    Tries the YOLO detector first; on any failure (or if weights are absent)
+    falls back to the saturated-yellow heuristic so the endpoint never breaks.
+    """
+    model = _get_ball_model()
+    if model is not None:
+        try:
+            return _detect_ball_yolo(model, bgr_image, width, height)
+        except Exception as exc:
+            logger.error("[ball] YOLO inference failed (%s); using HSV.", exc)
+    return _detect_ball_hsv(bgr_image, width, height)
+
+
+def _detect_ball_hsv(bgr_image, width: int, height: int):
     """Return up to BALL_MAX_RESULTS {x, y, r} dicts (normalized 0..1).
 
     Strategy: mask saturated yellow, then keep only blobs that are actually

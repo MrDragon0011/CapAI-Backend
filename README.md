@@ -29,6 +29,7 @@ Response:
       "angles": {"elbow_l": 157.0, "elbow_r": 142.3,
                  "knee_l": 96.2, "knee_r": 110.5, "shoulder_tilt": 4.1},
       "visibility": {"tracked": 20, "partial": 7, "estimated": 6},
+      "balls": [{"x": 0.51, "y": 0.48, "r": 0.04}],
       "kinematics_ms": 0.42
     }
   ]
@@ -40,8 +41,13 @@ Invalid input returns HTTP 400 with `{"ok": false, "error": "..."}`.
 Angles use the shoulder–elbow–wrist and hip–knee–ankle triplets plus the
 shoulder-line tilt from horizontal, with normalized x scaled by the image
 aspect ratio so angles reflect true geometry. Visibility tiers: tracked
-(>= 0.75), partial (0.30–0.74), estimated (< 0.30). Uploaded footage is
-processed in a temp directory and deleted immediately after analysis.
+(>= 0.75), partial (0.30–0.74), estimated (< 0.30). The `balls` array holds
+detected ball candidates as normalized center `x`/`y` and radius `r` (fraction
+of the longer image side); it is empty when no ball is found. Uploaded footage
+is processed in a temp directory and deleted immediately after analysis.
+
+This service returns JSON only — all skeleton/ball rendering lives in the
+frontend (CapAI-Frontend, deployed to cap-ai.netlify.app).
 
 ## Run locally
 
