@@ -74,6 +74,34 @@ MIN_POSE_DETECTION_CONFIDENCE = 0.6
 MIN_POSE_PRESENCE_CONFIDENCE = 0.6
 MIN_TRACKING_CONFIDENCE = 0.6
 
+# Preprocessing tuned for pool footage (glare + low wet-skin contrast)
+CLAHE_CLIP = 2.0
+CLAHE_GRID = (8, 8)
+DEGLARE_THRESHOLD = 230  # pixels brighter than this are blown-out pool highlights
+DEGLARE_CAP = 200        # tone them down to this so they stop fooling the detector
+
+
+def _preprocess(bgr_image):
+    """Enhance a pool frame for pose detection: tame glare, then boost contrast.
+
+    Returns a NEW BGR image. The original is kept untouched so colour-based
+    ball detection still sees the true pixels.
+    """
+    img = bgr_image.copy()
+
+    # 1. Deglare: pull down specular highlights off the water surface
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    glare = gray > DEGLARE_THRESHOLD
+    if glare.any():
+        img[glare] = np.minimum(img[glare], DEGLARE_CAP).astype(img.dtype)
+
+    # 2. CLAHE on the L channel: recover wet-skin / underwater contrast
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=CLAHE_GRID)
+    l = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
 
 def _ensure_model() -> bool:
     if MODEL_PATH.exists():
@@ -296,7 +324,8 @@ def _analyze_image(path, filename, content_type):
     if image is None:
         raise ValueError("Could not decode the uploaded image.")
     height, width = image.shape[:2]
-    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    enhanced = _preprocess(image)  # for pose detection only
+    rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
     frames = []
@@ -305,8 +334,9 @@ def _analyze_image(path, filename, content_type):
         if result.pose_landmarks:
             # Lock onto the most prominent athlete, then refine on a crop
             best = result.pose_landmarks[_select_best_pose(result.pose_landmarks)]
-            best, refined = _refine_pose(landmarker, image, best, width, height)
+            best, refined = _refine_pose(landmarker, enhanced, best, width, height)
             logger.info("[image] poses=%d refined=%s", len(result.pose_landmarks), refined)
+            # Ball detection uses the ORIGINAL frame (true colours)
             frames.append(_frame_result(best, width, height, 0, image))
 
     return _build_response(filename, content_type, width, height, frames)
@@ -337,14 +367,16 @@ def _analyze_video(path, filename, content_type):
                 break
             if width == 0 or height == 0:
                 height, width = image.shape[:2]
-            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            enhanced = _preprocess(image)  # for pose detection only
+            rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             timestamp_ms = int((frame_index / fps) * 1000)
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
             if result.pose_landmarks:
                 # Lock onto the most prominent athlete, then refine on a crop
                 best = result.pose_landmarks[_select_best_pose(result.pose_landmarks)]
-                best, _ = _refine_pose(refiner, image, best, width, height)
+                best, _ = _refine_pose(refiner, enhanced, best, width, height)
+                # Ball detection uses the ORIGINAL frame (true colours)
                 frames.append(_frame_result(best, width, height, frame_index, image))
             frame_index += 1
 
