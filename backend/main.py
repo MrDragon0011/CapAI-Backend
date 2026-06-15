@@ -41,15 +41,15 @@ VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".wmv", ".flv", ".
 TRACKED_THRESHOLD = 0.75
 PARTIAL_THRESHOLD = 0.30
 
-# Water polo ball: yellow/white — HSV ranges for detection
-BALL_HSV_RANGES = [
-    # Yellow
-    ((20, 80, 80), (35, 255, 255)),
-    # White / light
-    ((0, 0, 180), (180, 60, 255)),
-]
-BALL_MIN_RADIUS_PX = 8    # ~3 cm ball at ~3 m away, 1080p
-BALL_MAX_RADIUS_PX = 120  # close-up shot
+# Water polo ball is a saturated yellow. We deliberately do NOT match white,
+# because pool footage is full of white splash, foam and caps that would all
+# read as "ball". Tight, saturated yellow only.
+BALL_HSV_LO = (22, 120, 120)
+BALL_HSV_HI = (33, 255, 255)
+BALL_MIN_AREA_FRAC = 0.0002   # ignore tiny yellow specks
+BALL_MAX_AREA_FRAC = 0.08     # ignore huge yellow regions (lane gear, banners)
+BALL_MIN_CIRCULARITY = 0.65   # 1.0 = perfect circle; reject ragged splash blobs
+BALL_MAX_RESULTS = 1          # only the single best candidate
 
 ANGLE_JOINTS = {
     "elbow_l": (11, 13, 15),
@@ -171,32 +171,39 @@ def _compute_kinematics(lm, aspect: float):
 
 
 def _detect_ball(bgr_image, width: int, height: int):
-    """Return list of {x, y, r} dicts (normalized 0..1) for detected balls."""
-    hsv = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-    for (lo, hi) in BALL_HSV_RANGES:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+    """Return up to BALL_MAX_RESULTS {x, y, r} dicts (normalized 0..1).
 
-    # Morphological cleanup
+    Strategy: mask saturated yellow, then keep only blobs that are actually
+    round (high circularity) and a sensible size. This rejects the splash,
+    foam and white caps that wrecked the naive colour+Hough approach.
+    """
+    hsv = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array(BALL_HSV_LO), np.array(BALL_HSV_HI))
+
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-    blurred = cv2.GaussianBlur(mask, (9, 9), 2)
-    circles = cv2.HoughCircles(
-        blurred,
-        cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=max(BALL_MIN_RADIUS_PX * 2, 20),
-        param1=50,
-        param2=18,
-        minRadius=BALL_MIN_RADIUS_PX,
-        maxRadius=BALL_MAX_RADIUS_PX,
-    )
-    if circles is None:
-        return []
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    frame_area = float(width * height)
+    candidates = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < BALL_MIN_AREA_FRAC * frame_area or area > BALL_MAX_AREA_FRAC * frame_area:
+            continue
+        perim = cv2.arcLength(c, True)
+        if perim <= 0:
+            continue
+        circularity = 4.0 * math.pi * area / (perim * perim)
+        if circularity < BALL_MIN_CIRCULARITY:
+            continue
+        (cx, cy), r = cv2.minEnclosingCircle(c)
+        # Score: prefer rounder and larger blobs
+        candidates.append((circularity * area, cx, cy, r))
+
+    candidates.sort(key=lambda t: t[0], reverse=True)
     balls = []
-    for (cx, cy, r) in circles[0]:
+    for _, cx, cy, r in candidates[:BALL_MAX_RESULTS]:
         balls.append({
             "x": round(float(cx) / width, 4),
             "y": round(float(cy) / height, 4),
