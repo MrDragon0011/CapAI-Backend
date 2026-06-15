@@ -125,7 +125,7 @@ def _ensure_model() -> bool:
 @app.on_event("startup")
 def _startup():
     _ensure_model()
-    _get_ball_model()  # warm the YOLO detector so the first request isn't slow
+    # Ball model is loaded lazily on first request to avoid OOM at startup
 
 
 def _error(message: str, status: int = 400):
