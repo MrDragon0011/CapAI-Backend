@@ -119,6 +119,13 @@ ANGLE_JOINTS = {
 NUM_POSES = 5
 # Pad the person crop before the high-res refinement pass (fraction of bbox)
 CROP_PAD = 0.25
+# How many of the non-primary athletes to also return per frame (context only,
+# no kinematics) so the UI can draw every player in the scene.
+MAX_OTHER_PLAYERS = 4
+# Ball temporal carry-forward: even a trained detector drops the ball on
+# motion-blur / occlusion frames. Rather than flicker the marker out, carry the
+# last known position forward for a few frames so it reads as continuous.
+BALL_CARRY_MAX = 8
 
 MODEL_PATH = Path(__file__).parent / "pose_landmarker.task"
 MODEL_URL = (
@@ -457,12 +464,56 @@ def _empty_angles():
     return a
 
 
-def _frame_result(lm, width, height, index, bgr_image=None):
+def _others_payload(pose_landmarks_list, best_index):
+    """Landmarks for every detected athlete except the primary one.
+
+    Context only — no angles or refinement — so the UI can render the whole
+    scene without the cost of full kinematics on each extra player.
+    """
+    others = []
+    for i, lm in enumerate(pose_landmarks_list):
+        if i == best_index:
+            continue
+        others.append({"landmarks": _landmarks_payload(lm)})
+        if len(others) >= MAX_OTHER_PLAYERS:
+            break
+    return others
+
+
+class _BallTracker:
+    """Per-video ball smoother: carry the last detection forward over gaps.
+
+    A frame's raw ball detection (0 or 1 ball) goes in; the ball to actually
+    emit comes out. When the detector drops the ball we re-emit the last known
+    position for up to BALL_CARRY_MAX frames, tagged carried=True so the UI can
+    fade it. Stateless across videos — one instance per analysis.
+    """
+
+    def __init__(self):
+        self._last = None
+        self._age = 0
+
+    def update(self, balls):
+        if balls:
+            self._last = balls[0]
+            self._age = 0
+            return [{**self._last, "carried": False}]
+        if self._last is not None and self._age < BALL_CARRY_MAX:
+            self._age += 1
+            return [{**self._last, "carried": True}]
+        return []
+
+
+def _frame_result(lm, width, height, index, bgr_image=None, balls=None, others=None):
     """Build one frame's payload.
 
     `lm` may be None when no pose was detected — we still run ball detection
     and return a frame so the ball (and the image itself) shows up. In that
     case landmarks are empty, angles are null, and pose_detected is False.
+
+    `balls` lets the caller supply already-tracked detections (video carry-
+    forward); when None we detect on this frame directly. `others` carries the
+    non-primary athletes for whole-scene rendering.
     """
     aspect = width / height if height else 1.0
 
@@ -478,7 +529,8 @@ def _frame_result(lm, width, height, index, bgr_image=None):
         pose_detected = False
     kinematics_ms = round((time.perf_counter() - t0) * 1000.0, 4)
 
-    balls = _detect_ball(bgr_image, width, height) if bgr_image is not None else []
+    if balls is None:
+        balls = _detect_ball(bgr_image, width, height) if bgr_image is not None else []
 
     return {
         "index": index,
@@ -488,6 +540,7 @@ def _frame_result(lm, width, height, index, bgr_image=None):
         "visibility": visibility,
         "kinematics_ms": kinematics_ms,
         "balls": balls,
+        "others": others or [],
     }
 
 
@@ -529,16 +582,20 @@ def _analyze_image(path, filename, content_type):
     with _image_landmarker() as landmarker:
         result = landmarker.detect(mp_image)
         best = None
+        others = []
         if result.pose_landmarks:
-            # Lock onto the most prominent athlete, then refine on a crop
-            best = result.pose_landmarks[_select_best_pose(result.pose_landmarks)]
+            # Lock onto the most prominent athlete, keep the rest as context,
+            # then refine the primary one on a crop.
+            best_i = _select_best_pose(result.pose_landmarks)
+            others = _others_payload(result.pose_landmarks, best_i)
+            best = result.pose_landmarks[best_i]
             best, refined = _refine_pose(landmarker, enhanced, best, width, height)
             logger.info("[image] poses=%d refined=%s", len(result.pose_landmarks), refined)
         else:
             logger.info("[image] no pose detected; returning frame with ball only")
         # Always emit a frame so the ball (and image) shows even with no pose.
         # Ball detection uses the ORIGINAL frame (true colours).
-        frames.append(_frame_result(best, width, height, 0, image))
+        frames.append(_frame_result(best, width, height, 0, image, others=others))
 
     return _build_response(filename, content_type, width, height, frames)
 
@@ -564,6 +621,7 @@ def _analyze_video(path, filename, content_type):
 
     frames = []
     frame_index = 0
+    ball_tracker = _BallTracker()
 
     with _video_landmarker() as landmarker, _image_landmarker() as refiner:
         while len(frames) < MAX_FRAMES:
@@ -583,13 +641,22 @@ def _analyze_video(path, filename, content_type):
             timestamp_ms = int((frame_index / fps) * 1000)
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
             best = None
+            others = []
             if result.pose_landmarks:
-                # Lock onto the most prominent athlete, then refine on a crop
-                best = result.pose_landmarks[_select_best_pose(result.pose_landmarks)]
+                # Lock onto the most prominent athlete, keep the rest as context,
+                # then refine the primary one on a crop.
+                best_i = _select_best_pose(result.pose_landmarks)
+                others = _others_payload(result.pose_landmarks, best_i)
+                best = result.pose_landmarks[best_i]
                 best, _ = _refine_pose(refiner, enhanced, best, width, height)
+            # Ball detection uses the ORIGINAL frame (true colours); carry the
+            # last position forward over frames where the detector drops it.
+            balls = ball_tracker.update(_detect_ball(image, width, height))
             # Always emit a frame so we sample at SAMPLE_FPS regardless of pose.
-            # Ball detection uses the ORIGINAL frame (true colours).
-            frames.append(_frame_result(best, width, height, frame_index, image))
+            frames.append(
+                _frame_result(best, width, height, frame_index, image,
+                              balls=balls, others=others)
+            )
             frame_index += 1
 
     cap.release()
