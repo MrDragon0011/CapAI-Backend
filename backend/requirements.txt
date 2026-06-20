@@ -1,8 +1,9 @@
-fastapi
-uvicorn
-python-multipart
-mediapipe
-opencv-python-headless
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20
+slowapi==0.1.9
+mediapipe==0.10.18
+opencv-python-headless==4.10.0.84
 numpy<2
 torch --index-url https://download.pytorch.org/whl/cpu
-ultralytics
+ultralytics==8.3.55

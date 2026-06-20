@@ -12,14 +12,20 @@ import numpy as np
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="CapAI Backend")
 
+# CORS is the FIRST middleware added so it is the OUTERMOST layer: every
+# response — including 4xx/5xx and rate-limit rejections — gets CORS headers,
+# otherwise the browser surfaces a backend error as a misleading CORS failure.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -30,10 +36,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+def _client_ip(request: Request) -> str:
+    """Real client IP behind HF Spaces' reverse proxy.
+
+    request.client.host is the proxy, so prefer the first hop in
+    X-Forwarded-For. Falls back to the socket peer for direct/local calls.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+# Per-IP rate limiting. The default handler returns HTTP 429 with Retry-After.
+limiter = Limiter(key_func=_client_ip)
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"ok": False, "error": "Too many requests. Please slow down."},
+        headers={"Retry-After": "60"},
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_handler(request: Request, exc: Exception):
+    # Never leak a stack trace to the client; log the full detail server-side.
+    logger.exception("Unhandled error on %s", request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "error": "Internal server error."},
+    )
+
+
 MAX_BYTES = 200 * 1024 * 1024
 UPLOAD_CHUNK = 1024 * 1024
 SAMPLE_FPS = 3
 MAX_FRAMES = 60
+
+# Resource bounds so a small upload can't generate unbounded work / OOM.
+MAX_IMAGE_PIXELS = 50_000_000      # 50 MP decoded ceiling (decompression bombs)
+MAX_VIDEO_DIM = 4096               # reject >4K-on-the-long-side clips
+MAX_VIDEO_SECONDS = 120            # reject very long clips up front
+REQUEST_TIMEOUT_S = 90             # abort a single /analyze that runs too long
+MAX_CONCURRENT_ANALYSES = 2        # global cap so one client can't saturate CPU
+_analysis_sem = asyncio.Semaphore(MAX_CONCURRENT_ANALYSES)
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".heic", ".heif"}
 VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".wmv", ".flv", ".3gp", ".ts"}
@@ -76,9 +127,9 @@ MODEL_URL = (
 )
 
 # Reject low-confidence detections so we don't emit a degenerate centre-clustered skeleton
-MIN_POSE_DETECTION_CONFIDENCE = 0.6
-MIN_POSE_PRESENCE_CONFIDENCE = 0.6
-MIN_TRACKING_CONFIDENCE = 0.6
+MIN_POSE_DETECTION_CONFIDENCE = 0.4
+MIN_POSE_PRESENCE_CONFIDENCE = 0.4
+MIN_TRACKING_CONFIDENCE = 0.4
 
 # Preprocessing tuned for pool footage (glare + low wet-skin contrast)
 CLAHE_CLIP = 2.0
@@ -130,6 +181,56 @@ def _startup():
 
 def _error(message: str, status: int = 400):
     return JSONResponse(status_code=status, content={"ok": False, "error": message})
+
+
+def _sniff_kind(path: str):
+    """Identify the real media type from magic bytes, ignoring the filename.
+
+    Returns "image", "video", or None (unknown / not a media file). This is the
+    source of truth for routing — a .jpg-renamed .zip or a text file sniffs as
+    None and is rejected before any expensive decode work.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32)
+    except OSError:
+        return None
+    if len(head) < 12:
+        return None
+
+    # ISO base media (mp4/mov/m4v/3gp + heic/heif) share the ftyp box.
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        heif_brands = {b"heic", b"heix", b"hevc", b"heim", b"heis",
+                       b"mif1", b"msf1", b"avif"}
+        return "image" if brand in heif_brands else "video"
+
+    # Images
+    if head[:3] == b"\xff\xd8\xff":
+        return "image"                                   # jpeg
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image"                                   # png
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image"                                   # gif
+    if head[:2] == b"BM":
+        return "image"                                   # bmp
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image"                                   # webp
+    if head[:2] in (b"II", b"MM"):
+        return "image"                                   # tiff
+
+    # Videos
+    if head[:4] == b"\x1aE\xdf\xa3":
+        return "video"                                   # matroska / webm
+    if head[:4] == b"RIFF" and head[8:12] == b"AVI ":
+        return "video"                                   # avi
+    if head[:3] == b"FLV":
+        return "video"                                   # flv
+    if head[:4] in (b"\x00\x00\x01\xba", b"\x00\x00\x01\xb3"):
+        return "video"                                   # mpeg ps / ts
+    if head[:4] == b"OggS":
+        return "video"                                   # ogg
+    return None
 
 
 def _angle(a, b, c) -> float:
@@ -350,18 +451,39 @@ def _landmarks_payload(lm):
     return [[round(p.x, 4), round(p.y, 4), round(p.visibility, 4)] for p in lm]
 
 
+def _empty_angles():
+    a = {name: None for name in ANGLE_JOINTS}
+    a["shoulder_tilt"] = None
+    return a
+
+
 def _frame_result(lm, width, height, index, bgr_image=None):
+    """Build one frame's payload.
+
+    `lm` may be None when no pose was detected — we still run ball detection
+    and return a frame so the ball (and the image itself) shows up. In that
+    case landmarks are empty, angles are null, and pose_detected is False.
+    """
     aspect = width / height if height else 1.0
 
     t0 = time.perf_counter()
-    angles, visibility = _compute_kinematics(lm, aspect)
+    if lm is not None:
+        angles, visibility = _compute_kinematics(lm, aspect)
+        landmarks = _landmarks_payload(lm)
+        pose_detected = True
+    else:
+        angles = _empty_angles()
+        visibility = {"tracked": 0, "partial": 0, "estimated": 0}
+        landmarks = []
+        pose_detected = False
     kinematics_ms = round((time.perf_counter() - t0) * 1000.0, 4)
 
     balls = _detect_ball(bgr_image, width, height) if bgr_image is not None else []
 
     return {
         "index": index,
-        "landmarks": _landmarks_payload(lm),
+        "pose_detected": pose_detected,
+        "landmarks": landmarks,
         "angles": angles,
         "visibility": visibility,
         "kinematics_ms": kinematics_ms,
@@ -397,6 +519,8 @@ def _analyze_image(path, filename, content_type):
     if image is None:
         raise ValueError("Could not decode the uploaded image.")
     height, width = image.shape[:2]
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError("Image resolution exceeds the 50 MP limit.")
     enhanced = _preprocess(image)  # for pose detection only
     rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -404,13 +528,17 @@ def _analyze_image(path, filename, content_type):
     frames = []
     with _image_landmarker() as landmarker:
         result = landmarker.detect(mp_image)
+        best = None
         if result.pose_landmarks:
             # Lock onto the most prominent athlete, then refine on a crop
             best = result.pose_landmarks[_select_best_pose(result.pose_landmarks)]
             best, refined = _refine_pose(landmarker, enhanced, best, width, height)
             logger.info("[image] poses=%d refined=%s", len(result.pose_landmarks), refined)
-            # Ball detection uses the ORIGINAL frame (true colours)
-            frames.append(_frame_result(best, width, height, 0, image))
+        else:
+            logger.info("[image] no pose detected; returning frame with ball only")
+        # Always emit a frame so the ball (and image) shows even with no pose.
+        # Ball detection uses the ORIGINAL frame (true colours).
+        frames.append(_frame_result(best, width, height, 0, image))
 
     return _build_response(filename, content_type, width, height, frames)
 
@@ -423,6 +551,15 @@ def _analyze_video(path, filename, content_type):
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    if max(width, height) > MAX_VIDEO_DIM:
+        cap.release()
+        raise ValueError("Video resolution exceeds the 4K limit.")
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+    if fps > 0 and frame_count > 0 and (frame_count / fps) > MAX_VIDEO_SECONDS:
+        cap.release()
+        raise ValueError("Video is longer than the 120 second limit.")
+
     sample_every = max(1, int(round(fps / SAMPLE_FPS)))
 
     frames = []
@@ -445,12 +582,14 @@ def _analyze_video(path, filename, content_type):
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             timestamp_ms = int((frame_index / fps) * 1000)
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
+            best = None
             if result.pose_landmarks:
                 # Lock onto the most prominent athlete, then refine on a crop
                 best = result.pose_landmarks[_select_best_pose(result.pose_landmarks)]
                 best, _ = _refine_pose(refiner, enhanced, best, width, height)
-                # Ball detection uses the ORIGINAL frame (true colours)
-                frames.append(_frame_result(best, width, height, frame_index, image))
+            # Always emit a frame so we sample at SAMPLE_FPS regardless of pose.
+            # Ball detection uses the ORIGINAL frame (true colours).
+            frames.append(_frame_result(best, width, height, frame_index, image))
             frame_index += 1
 
     cap.release()
@@ -482,32 +621,34 @@ def health():
 
 
 @app.post("/analyze")
+@limiter.limit("6/minute")
 async def analyze(
+    request: Request,
     footage: UploadFile = File(...),
     consent: str = Form(...),
 ):
     if consent != "accepted":
         return _error("Consent was not accepted.")
 
-    filename = footage.filename or "upload"
-    suffix = Path(filename).suffix.lower()
+    # Reject oversized bodies up front using the declared length, before we
+    # stream a single byte to disk. The streaming guard below is the real
+    # enforcement (the header can lie), this just fails fast on honest clients.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_BYTES:
+        return _error("File exceeds the 200 MB limit.", 413)
 
-    if suffix in IMAGE_EXT:
-        is_video = False
-    elif suffix in VIDEO_EXT:
-        is_video = True
-    else:
-        return _error(
-            "Unsupported file type. "
-            "Images: JPG, PNG, GIF, BMP, WEBP, TIFF, HEIC. "
-            "Videos: MP4, MOV, AVI, MKV, WEBM, M4V, WMV, FLV, 3GP."
-        )
+    filename = footage.filename or "upload"
+    # Only ever derive a temp-file suffix from a whitelisted extension; never
+    # build a filesystem path from the raw client filename (path traversal).
+    ext = Path(filename).suffix.lower()
+    if ext not in IMAGE_EXT and ext not in VIDEO_EXT:
+        ext = ""
 
     if not MODEL_PATH.exists() and not _ensure_model():
         return _error("Pose model is unavailable on the server.", 503)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="capai_"))
-    tmp_path = str(tmp_dir / f"footage{suffix}")
+    tmp_path = str(tmp_dir / f"footage{ext}")
 
     try:
         written = 0
@@ -518,19 +659,35 @@ async def analyze(
                     break
                 written += len(chunk)
                 if written > MAX_BYTES:
-                    return _error("File exceeds the 200 MB limit.")
+                    return _error("File exceeds the 200 MB limit.", 413)
                 out.write(chunk)
 
         if written == 0:
             return _error("Uploaded file is empty.")
 
+        # Trust the bytes, not the extension or Content-Type, to route.
+        kind = _sniff_kind(tmp_path)
+        if kind is None:
+            return _error(
+                "Unsupported or unrecognized file. "
+                "Upload a real image (JPG, PNG, GIF, BMP, WEBP, TIFF, HEIC) "
+                "or video (MP4, MOV, AVI, MKV, WEBM, FLV, 3GP)."
+            )
+        is_video = kind == "video"
+
         loop = asyncio.get_running_loop()
         worker = _analyze_video if is_video else _analyze_image
         content_type = footage.content_type or ""
         try:
-            result = await loop.run_in_executor(
-                None, worker, tmp_path, filename, content_type
-            )
+            async with _analysis_sem:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, worker, tmp_path, filename, content_type
+                    ),
+                    timeout=REQUEST_TIMEOUT_S,
+                )
+        except asyncio.TimeoutError:
+            return _error("Analysis timed out. Try a shorter or smaller clip.", 504)
         except ValueError as exc:
             return _error(str(exc))
 
