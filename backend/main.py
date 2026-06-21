@@ -91,6 +91,10 @@ VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".wmv", ".flv", ".
 
 TRACKED_THRESHOLD = 0.75
 PARTIAL_THRESHOLD = 0.30
+# A joint angle is only meaningful if the landmarks forming it are actually
+# visible. Underwater legs come back as low-visibility ESTIMATES, so without
+# this gate we'd report confident-looking knee angles for joints we can't see.
+ANGLE_MIN_VISIBILITY = 0.5
 
 # Water polo ball is a saturated yellow. We deliberately do NOT match white,
 # because pool footage is full of white splash, foam and caps that would all
@@ -262,14 +266,26 @@ def _shoulder_tilt(lm, aspect: float) -> float:
     return tilt
 
 
+def _visible(lm, *idxs):
+    """True only if every listed landmark is confidently visible."""
+    return all(lm[i].visibility >= ANGLE_MIN_VISIBILITY for i in idxs)
+
+
 def _compute_kinematics(lm, aspect: float):
     def point(i):
         return (lm[i].x * aspect, lm[i].y)
 
+    # Report an angle only when its joints are actually visible; otherwise null
+    # so the UI greys it out instead of showing a bogus underwater estimate.
     angles = {}
     for name, (a, b, c) in ANGLE_JOINTS.items():
-        angles[name] = round(_angle(point(a), point(b), point(c)), 1)
-    angles["shoulder_tilt"] = round(_shoulder_tilt(lm, aspect), 1)
+        if _visible(lm, a, b, c):
+            angles[name] = round(_angle(point(a), point(b), point(c)), 1)
+        else:
+            angles[name] = None
+    angles["shoulder_tilt"] = (
+        round(_shoulder_tilt(lm, aspect), 1) if _visible(lm, 11, 12) else None
+    )
 
     tracked = partial = estimated = 0
     for landmark in lm:
@@ -544,6 +560,32 @@ def _frame_result(lm, width, height, index, bgr_image=None, balls=None, others=N
     }
 
 
+def _mp_rgb(bgr_image):
+    """Wrap a BGR frame as an RGB MediaPipe Image."""
+    rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+    return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+
+def _detect_with_fallback(detect_image, bgr_image):
+    """Detect poses on the enhanced frame, falling back to the raw frame.
+
+    Pool preprocessing (CLAHE/deglare) usually helps, but on some frames it
+    suppresses the athlete entirely. Try enhanced first; if nothing is found,
+    retry on the untouched frame. Returns (poses, image_those_poses_came_from)
+    so the caller can refine on the matching image. `detect_image` is a single
+    argument IMAGE-mode detect callable.
+    """
+    enhanced = _preprocess(bgr_image)
+    res = detect_image(_mp_rgb(enhanced))
+    if res.pose_landmarks:
+        return res.pose_landmarks, enhanced
+    res_raw = detect_image(_mp_rgb(bgr_image))
+    if res_raw.pose_landmarks:
+        logger.info("[pose] found on raw frame after enhanced failed")
+        return res_raw.pose_landmarks, bgr_image
+    return [], enhanced
+
+
 def _image_landmarker():
     options = mp_vision.PoseLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
@@ -574,25 +616,24 @@ def _analyze_image(path, filename, content_type):
     height, width = image.shape[:2]
     if width * height > MAX_IMAGE_PIXELS:
         raise ValueError("Image resolution exceeds the 50 MP limit.")
-    enhanced = _preprocess(image)  # for pose detection only
-    rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
     frames = []
     with _image_landmarker() as landmarker:
-        result = landmarker.detect(mp_image)
+        # Detect on the enhanced frame, falling back to the raw frame if pool
+        # preprocessing hid the athlete. `src` is whichever image won.
+        poses, src = _detect_with_fallback(landmarker.detect, image)
         best = None
         others = []
-        if result.pose_landmarks:
+        if poses:
             # Lock onto the most prominent athlete, keep the rest as context,
             # then refine the primary one on a crop.
-            best_i = _select_best_pose(result.pose_landmarks)
-            others = _others_payload(result.pose_landmarks, best_i)
-            best = result.pose_landmarks[best_i]
-            best, refined = _refine_pose(landmarker, enhanced, best, width, height)
-            logger.info("[image] poses=%d refined=%s", len(result.pose_landmarks), refined)
+            best_i = _select_best_pose(poses)
+            others = _others_payload(poses, best_i)
+            best = poses[best_i]
+            best, refined = _refine_pose(landmarker, src, best, width, height)
+            logger.info("[image] poses=%d refined=%s", len(poses), refined)
         else:
-            logger.info("[image] no pose detected; returning frame with ball only")
+            logger.info("[image] no pose detected (enhanced+raw); ball only")
         # Always emit a frame so the ball (and image) shows even with no pose.
         # Ball detection uses the ORIGINAL frame (true colours).
         frames.append(_frame_result(best, width, height, 0, image, others=others))
@@ -636,19 +677,24 @@ def _analyze_video(path, filename, content_type):
             if width == 0 or height == 0:
                 height, width = image.shape[:2]
             enhanced = _preprocess(image)  # for pose detection only
-            rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             timestamp_ms = int((frame_index / fps) * 1000)
-            result = landmarker.detect_for_video(mp_image, timestamp_ms)
+            result = landmarker.detect_for_video(_mp_rgb(enhanced), timestamp_ms)
+            poses, src = result.pose_landmarks, enhanced
+            if not poses:
+                # Preprocessing may have hidden the athlete; retry on the raw
+                # frame with the IMAGE-mode refiner (no timestamp ordering).
+                raw = refiner.detect(_mp_rgb(image))
+                if raw.pose_landmarks:
+                    poses, src = raw.pose_landmarks, image
             best = None
             others = []
-            if result.pose_landmarks:
+            if poses:
                 # Lock onto the most prominent athlete, keep the rest as context,
                 # then refine the primary one on a crop.
-                best_i = _select_best_pose(result.pose_landmarks)
-                others = _others_payload(result.pose_landmarks, best_i)
-                best = result.pose_landmarks[best_i]
-                best, _ = _refine_pose(refiner, enhanced, best, width, height)
+                best_i = _select_best_pose(poses)
+                others = _others_payload(poses, best_i)
+                best = poses[best_i]
+                best, _ = _refine_pose(refiner, src, best, width, height)
             # Ball detection uses the ORIGINAL frame (true colours); carry the
             # last position forward over frames where the detector drops it.
             balls = ball_tracker.update(_detect_ball(image, width, height))
