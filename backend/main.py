@@ -137,10 +137,19 @@ MODEL_URL = (
     "pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
 )
 
-# Reject low-confidence detections so we don't emit a degenerate centre-clustered skeleton
-MIN_POSE_DETECTION_CONFIDENCE = 0.4
-MIN_POSE_PRESENCE_CONFIDENCE = 0.4
+# Reject low-confidence detections so we don't emit a degenerate centre-clustered
+# skeleton. Water polo bodies are inherently low-confidence (legs submerged, lots
+# of back-facing shots), so we sit lower than the land-footage default of ~0.5.
+MIN_POSE_DETECTION_CONFIDENCE = 0.3
+MIN_POSE_PRESENCE_CONFIDENCE = 0.3
 MIN_TRACKING_CONFIDENCE = 0.4
+
+# Tiled fallback for wide shots. When whole-frame detection finds nobody, split
+# the frame into an overlapping grid and detect per-tile so small, distant
+# players appear large enough for MediaPipe's person detector to fire. Overlap
+# stops a body that straddles a tile seam from being missed by both tiles.
+TILE_GRID = (2, 2)
+TILE_OVERLAP = 0.15
 
 # Preprocessing tuned for pool footage (glare + low wet-skin contrast)
 CLAHE_CLIP = 2.0
@@ -566,14 +575,51 @@ def _mp_rgb(bgr_image):
     return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
 
-def _detect_with_fallback(detect_image, bgr_image):
-    """Detect poses on the enhanced frame, falling back to the raw frame.
+def _detect_tiled(detect_image, bgr_image, width, height):
+    """Last-resort wide-shot detection: split into overlapping tiles, detect on
+    each (so small/distant players are large enough to fire), and remap every
+    landmark back to full-frame normalized coords.
+
+    Overlapping tiles can detect the same player twice; that's harmless —
+    _select_best_pose still picks the biggest body and _others_payload caps the
+    rest, so at worst a duplicate context skeleton is drawn.
+    """
+    rows, cols = TILE_GRID
+    tw, th = width // cols, height // rows
+    if tw < 32 or th < 32:
+        return []
+    ox, oy = int(tw * TILE_OVERLAP), int(th * TILE_OVERLAP)
+    found = []
+    for r in range(rows):
+        for c in range(cols):
+            x0 = max(0, c * tw - ox)
+            y0 = max(0, r * th - oy)
+            x1 = min(width, (c + 1) * tw + ox)
+            y1 = min(height, (r + 1) * th + oy)
+            cw, ch = x1 - x0, y1 - y0
+            crop = bgr_image[y0:y1, x0:x1]
+            try:
+                res = detect_image(_mp_rgb(crop))
+            except Exception:
+                continue
+            for lm in res.pose_landmarks:
+                for p in lm:
+                    p.x = (x0 + p.x * cw) / width
+                    p.y = (y0 + p.y * ch) / height
+                found.append(lm)
+    return found
+
+
+def _detect_with_fallback(detect_image, bgr_image, width, height):
+    """Detect poses on the enhanced frame, falling back to the raw frame, then
+    to a tiled pass for wide shots.
 
     Pool preprocessing (CLAHE/deglare) usually helps, but on some frames it
     suppresses the athlete entirely. Try enhanced first; if nothing is found,
-    retry on the untouched frame. Returns (poses, image_those_poses_came_from)
-    so the caller can refine on the matching image. `detect_image` is a single
-    argument IMAGE-mode detect callable.
+    retry on the untouched frame; if still nothing, tile the frame so small
+    distant players become detectable. Returns (poses, image_those_poses_came
+    _from) so the caller can refine on the matching image. `detect_image` is a
+    single-argument IMAGE-mode detect callable.
     """
     enhanced = _preprocess(bgr_image)
     res = detect_image(_mp_rgb(enhanced))
@@ -583,6 +629,10 @@ def _detect_with_fallback(detect_image, bgr_image):
     if res_raw.pose_landmarks:
         logger.info("[pose] found on raw frame after enhanced failed")
         return res_raw.pose_landmarks, bgr_image
+    tiled = _detect_tiled(detect_image, bgr_image, width, height)
+    if tiled:
+        logger.info("[pose] found %d via tiled fallback", len(tiled))
+        return tiled, bgr_image
     return [], enhanced
 
 
@@ -621,7 +671,7 @@ def _analyze_image(path, filename, content_type):
     with _image_landmarker() as landmarker:
         # Detect on the enhanced frame, falling back to the raw frame if pool
         # preprocessing hid the athlete. `src` is whichever image won.
-        poses, src = _detect_with_fallback(landmarker.detect, image)
+        poses, src = _detect_with_fallback(landmarker.detect, image, width, height)
         best = None
         others = []
         if poses:
