@@ -644,31 +644,17 @@ def _detect_with_fallback(detect_image, bgr_image, width, height):
 
 
 def _get_sr_model():
-    """Lazily load Real-ESRGAN x2plus. Returns the upsampler or None."""
+    """Lazily load an EDSR x2 SR model via super-image. Returns model or None."""
     global _sr_model
     if _sr_model is not None:
         return _sr_model or None
     try:
-        from basicsr.archs.rrdbnet_arch import RRDBNet
-        from realesrgan import RealESRGANer
         import torch
+        from super_image import EdsrModel
         _sr_device = "cuda" if torch.cuda.is_available() else "cpu"
-        net = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64,
-                      num_block=23, num_grow_ch=32, scale=2)
-        _sr_model = RealESRGANer(
-            scale=2,
-            model_path=(
-                "https://github.com/xinntao/Real-ESRGAN/releases/download"
-                "/v0.2.1/RealESRGAN_x2plus.pth"
-            ),
-            model=net,
-            tile=128,        # tiled inference keeps peak RAM predictable on CPU
-            tile_pad=10,
-            pre_pad=0,
-            half=torch.cuda.is_available(),  # float16 only on GPU
-            device=_sr_device,
-        )
-        logger.info("[sr] Real-ESRGAN x2plus loaded on %s", _sr_device)
+        _sr_model = EdsrModel.from_pretrained("eugenesiow/edsr-base", scale=2)
+        _sr_model = _sr_model.to(_sr_device).eval()
+        logger.info("[sr] EDSR x2 loaded on %s", _sr_device)
     except Exception as exc:
         logger.error("[sr] Failed to load SR model (%s); SR disabled.", exc)
         _sr_model = False
@@ -677,6 +663,10 @@ def _get_sr_model():
 
 def _upscale(bgr_image):
     """Return a 2x upscaled BGR image, or None if SR is unavailable/fails."""
+    import torch
+    from super_image.data import EdsrImageDataset
+    from PIL import Image as PilImage
+
     h, w = bgr_image.shape[:2]
     long_edge = max(h, w)
     if long_edge > SR_INPUT_CAP:
@@ -690,8 +680,16 @@ def _upscale(bgr_image):
     if model is None:
         return None
     try:
-        out, _ = model.enhance(bgr_image, outscale=2)
-        return out
+        # super-image works with PIL RGB images
+        rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+        pil_img = PilImage.fromarray(rgb)
+        inputs = EdsrImageDataset.collate_fn([{"lr": pil_img}])
+        with torch.no_grad():
+            preds = model(inputs["lr"].to(next(model.parameters()).device))
+        # Convert output tensor back to BGR numpy
+        out_np = preds.squeeze(0).cpu().clamp(0, 1).numpy()
+        out_np = (out_np.transpose(1, 2, 0) * 255).astype("uint8")
+        return cv2.cvtColor(out_np, cv2.COLOR_RGB2BGR)
     except Exception as exc:
         logger.error("[sr] enhance failed: %s", exc)
         return None
