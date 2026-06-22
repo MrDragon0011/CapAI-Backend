@@ -651,6 +651,8 @@ def _get_sr_model():
     try:
         from basicsr.archs.rrdbnet_arch import RRDBNet
         from realesrgan import RealESRGANer
+        import torch
+        _sr_device = "cuda" if torch.cuda.is_available() else "cpu"
         net = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64,
                       num_block=23, num_grow_ch=32, scale=2)
         _sr_model = RealESRGANer(
@@ -663,10 +665,10 @@ def _get_sr_model():
             tile=128,        # tiled inference keeps peak RAM predictable on CPU
             tile_pad=10,
             pre_pad=0,
-            half=False,      # CPU does not support float16
-            device="cpu",
+            half=torch.cuda.is_available(),  # float16 only on GPU
+            device=_sr_device,
         )
-        logger.info("[sr] Real-ESRGAN x2plus loaded")
+        logger.info("[sr] Real-ESRGAN x2plus loaded on %s", _sr_device)
     except Exception as exc:
         logger.error("[sr] Failed to load SR model (%s); SR disabled.", exc)
         _sr_model = False
