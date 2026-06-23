@@ -664,7 +664,7 @@ def _get_sr_model():
 def _upscale(bgr_image):
     """Return a 2x upscaled BGR image, or None if SR is unavailable/fails."""
     import torch
-    from super_image.data import EdsrImageDataset
+    import torchvision.transforms as T
     from PIL import Image as PilImage
 
     h, w = bgr_image.shape[:2]
@@ -680,13 +680,12 @@ def _upscale(bgr_image):
     if model is None:
         return None
     try:
-        # super-image works with PIL RGB images
         rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
         pil_img = PilImage.fromarray(rgb)
-        inputs = EdsrImageDataset.collate_fn([{"lr": pil_img}])
+        device = next(model.parameters()).device
+        tensor = T.ToTensor()(pil_img).unsqueeze(0).to(device)
         with torch.no_grad():
-            preds = model(inputs["lr"].to(next(model.parameters()).device))
-        # Convert output tensor back to BGR numpy
+            preds = model(tensor)
         out_np = preds.squeeze(0).cpu().clamp(0, 1).numpy()
         out_np = (out_np.transpose(1, 2, 0) * 255).astype("uint8")
         return cv2.cvtColor(out_np, cv2.COLOR_RGB2BGR)
