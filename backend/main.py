@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import logging
 import math
 import shutil
@@ -131,12 +130,6 @@ MAX_OTHER_PLAYERS = 4
 # motion-blur / occlusion frames. Rather than flicker the marker out, carry the
 # last known position forward for a few frames so it reads as continuous.
 BALL_CARRY_MAX = 8
-
-# Super-resolution (opt-in via sr=accepted, images only). Real-ESRGAN x2plus
-# runs on CPU but is slow — input is capped so the upscale finishes within the
-# request timeout. On a GPU-backed instance the cap can be raised significantly.
-SR_INPUT_CAP = 400       # cap long edge before upscaling (→ max 800 px output)
-_sr_model = None         # lazy singleton; False = load attempted and failed
 
 MODEL_PATH = Path(__file__).parent / "pose_landmarker.task"
 MODEL_URL = (
@@ -643,66 +636,6 @@ def _detect_with_fallback(detect_image, bgr_image, width, height):
     return [], enhanced
 
 
-def _get_sr_model():
-    """Lazily load an EDSR x2 SR model via super-image. Returns model or None."""
-    global _sr_model
-    if _sr_model is not None:
-        return _sr_model or None
-    try:
-        import torch
-        from super_image import EdsrModel
-        _sr_device = "cuda" if torch.cuda.is_available() else "cpu"
-        _sr_model = EdsrModel.from_pretrained("eugenesiow/edsr-base", scale=2)
-        _sr_model = _sr_model.to(_sr_device).eval()
-        logger.info("[sr] EDSR x2 loaded on %s", _sr_device)
-    except Exception as exc:
-        logger.error("[sr] Failed to load SR model (%s); SR disabled.", exc)
-        _sr_model = False
-    return _sr_model or None
-
-
-def _upscale(bgr_image):
-    """Return a 2x upscaled BGR image, or None if SR is unavailable/fails."""
-    import torch
-    import torchvision.transforms as T
-    from PIL import Image as PilImage
-
-    h, w = bgr_image.shape[:2]
-    long_edge = max(h, w)
-    if long_edge > SR_INPUT_CAP:
-        scale = SR_INPUT_CAP / long_edge
-        bgr_image = cv2.resize(
-            bgr_image,
-            (int(w * scale), int(h * scale)),
-            interpolation=cv2.INTER_AREA,
-        )
-    model = _get_sr_model()
-    if model is None:
-        return None
-    try:
-        rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-        pil_img = PilImage.fromarray(rgb)
-        device = next(model.parameters()).device
-        tensor = T.ToTensor()(pil_img).unsqueeze(0).to(device)
-        with torch.no_grad():
-            preds = model(tensor)
-        out_np = preds.squeeze(0).cpu().clamp(0, 1).numpy()
-        out_np = (out_np.transpose(1, 2, 0) * 255).astype("uint8")
-        return cv2.cvtColor(out_np, cv2.COLOR_RGB2BGR)
-    except Exception as exc:
-        logger.error("[sr] enhance failed: %s", exc)
-        return None
-
-
-def _to_data_uri(bgr_image):
-    """Encode a BGR image as a PNG data URI string."""
-    ok, buf = cv2.imencode(".png", bgr_image)
-    if not ok:
-        return None
-    b64 = base64.b64encode(buf.tobytes()).decode()
-    return f"data:image/png;base64,{b64}"
-
-
 def _image_landmarker():
     options = mp_vision.PoseLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
@@ -726,7 +659,7 @@ def _video_landmarker():
     return mp_vision.PoseLandmarker.create_from_options(options)
 
 
-def _analyze_image(path, filename, content_type, run_sr=False):
+def _analyze_image(path, filename, content_type):
     image = cv2.imread(path)
     if image is None:
         raise ValueError("Could not decode the uploaded image.")
@@ -755,20 +688,10 @@ def _analyze_image(path, filename, content_type, run_sr=False):
         # Ball detection uses the ORIGINAL frame (true colours).
         frames.append(_frame_result(best, width, height, 0, image, others=others))
 
-    upscaled_uri = None
-    if run_sr:
-        t0 = time.perf_counter()
-        upscaled = _upscale(image)
-        if upscaled is not None:
-            upscaled_uri = _to_data_uri(upscaled)
-            logger.info("[sr] upscaled in %.1fs", time.perf_counter() - t0)
-        else:
-            logger.warning("[sr] upscale unavailable; omitting upscaled_image")
-
-    return _build_response(filename, content_type, width, height, frames, upscaled_uri)
+    return _build_response(filename, content_type, width, height, frames)
 
 
-def _analyze_video(path, filename, content_type, run_sr=False):  # run_sr ignored for video
+def _analyze_video(path, filename, content_type):
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError("Could not open the uploaded video.")
@@ -836,8 +759,8 @@ def _analyze_video(path, filename, content_type, run_sr=False):  # run_sr ignore
     return _build_response(filename, content_type, width, height, frames)
 
 
-def _build_response(filename, content_type, width, height, frames, upscaled_image=None):
-    resp = {
+def _build_response(filename, content_type, width, height, frames):
+    return {
         "ok": True,
         "source": {
             "filename": filename,
@@ -848,9 +771,6 @@ def _build_response(filename, content_type, width, height, frames, upscaled_imag
         },
         "frames": frames,
     }
-    if upscaled_image:
-        resp["upscaled_image"] = upscaled_image
-    return resp
 
 
 @app.get("/")
@@ -869,7 +789,6 @@ async def analyze(
     request: Request,
     footage: UploadFile = File(...),
     consent: str = Form(...),
-    sr: str = Form(default=""),
 ):
     if consent != "accepted":
         return _error("Consent was not accepted.")
@@ -918,7 +837,6 @@ async def analyze(
                 "or video (MP4, MOV, AVI, MKV, WEBM, FLV, 3GP)."
             )
         is_video = kind == "video"
-        run_sr = (sr == "accepted") and not is_video
 
         loop = asyncio.get_running_loop()
         worker = _analyze_video if is_video else _analyze_image
@@ -927,7 +845,7 @@ async def analyze(
             async with _analysis_sem:
                 result = await asyncio.wait_for(
                     loop.run_in_executor(
-                        None, worker, tmp_path, filename, content_type, run_sr
+                        None, worker, tmp_path, filename, content_type
                     ),
                     timeout=REQUEST_TIMEOUT_S,
                 )
