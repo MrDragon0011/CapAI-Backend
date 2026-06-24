@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CapAI Pose Annotator</title>
+<style>
+  :root {
+    --bg: #0e1117; --panel: #161b22; --line: #2b3340; --text: #e6edf3;
+    --muted: #8b949e; --accent: #2f81f7; --good: #3fb950; --warn: #d29922;
+    --off: #6e7681; --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 10px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .grow { flex: 1; }
+  button {
+    background: #21262d; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.good { background: var(--good); border-color: var(--good); color: #04210b; }
+  .counter { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .bar { height: 5px; background: #21262d; border-radius: 3px; overflow: hidden; width: 160px; }
+  .bar > div { height: 100%; background: var(--good); width: 0; transition: width .2s; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .stage-wrap {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 16px; min-width: 0; overflow: hidden;
+  }
+  .stage { position: relative; line-height: 0; box-shadow: 0 0 0 1px var(--line); }
+  .stage img { display: block; max-width: 100%; max-height: calc(100vh - 120px); }
+  .stage svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair; }
+  .bone { stroke: var(--accent); stroke-width: 2; opacity: .65; }
+  .bone.weak { stroke: var(--warn); opacity: .4; stroke-dasharray: 4 3; }
+  .pt { stroke: #0b0e14; stroke-width: 1.5; cursor: grab; }
+  .pt.v2 { fill: var(--good); }
+  .pt.v1 { fill: var(--warn); }
+  .pt.v0 { fill: var(--off); opacity: .55; }
+  .pt.sel { stroke: #fff; stroke-width: 2.5; }
+  aside {
+    width: 280px; background: var(--panel); border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .aside-head { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .flag { color: var(--warn); font-size: 12px; }
+  .list { overflow-y: auto; flex: 1; }
+  .row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 14px; cursor: pointer;
+    border-bottom: 1px solid #1d242d; font-size: 12px;
+  }
+  .row:hover { background: #1d242d; }
+  .row.active { background: #1f6feb33; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); flex: none; }
+  .dot.done { background: var(--good); }
+  .dot.nodet { background: var(--bad); }
+  .dot.declined { background: transparent; box-shadow: inset 0 0 0 2px var(--bad); }
+  .row.declined .nm { text-decoration: line-through; color: var(--muted); }
+  button.danger { border-color: var(--bad); }
+  button.danger:hover { background: var(--bad); color: #2a0907; }
+  .row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .legend { padding: 10px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  .legend b { color: var(--text); font-weight: 600; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+  kbd { background:#21262d; border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CapAI Pose Annotator</h1>
+  <button id="prev">◀ Prev <kbd>A</kbd></button>
+  <span class="counter" id="counter">–/–</span>
+  <button id="next">Next ▶ <kbd>D</kbd></button>
+  <button id="nextNew">Next pending</button>
+  <span class="grow"></span>
+  <div class="bar"><div id="barFill"></div></div>
+  <span class="counter" id="progress">0 reviewed</span>
+  <button id="review" class="good">Mark reviewed <kbd>R</kbd></button>
+  <button id="decline" class="danger">Decline <kbd>X</kbd></button>
+  <button id="export" class="primary">Export COCO</button>
+</header>
+<main>
+  <div class="stage-wrap">
+    <div class="stage" id="stage">
+      <img id="frame" alt="" />
+      <svg id="overlay" preserveAspectRatio="none"></svg>
+    </div>
+  </div>
+  <aside>
+    <div class="aside-head">
+      <div id="fname">—</div>
+      <div class="flag" id="flag"></div>
+    </div>
+    <div class="list" id="list"></div>
+    <div class="legend">
+      <div><span class="sw" style="background:var(--good)"></span><b>Visible</b></div>
+      <div><span class="sw" style="background:var(--warn)"></span><b>Underwater / occluded</b></div>
+      <div><span class="sw" style="background:var(--off)"></span><b>Not labelled</b></div>
+      <div style="margin-top:8px">Drag a point to move it.<br>Click a point to cycle its state.<br>
+        <kbd>A</kbd>/<kbd>D</kbd> nav · <kbd>R</kbd> reviewed · <kbd>X</kbd> decline · <kbd>E</kbd> cycle selected</div>
+      <div style="margin-top:6px">Decline a blurry / wide / useless frame to drop it
+        from the export without deleting it.</div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let DATA = null;        // {keypoint_names, skeleton, images:[...]}
+let cur = -1;           // current frame index
+let kps = [];           // working copy of current frame keypoints [[x,y,v],...]
+let dirty = false;      // unsaved changes on current frame
+let declined = false;   // current frame is rejected (excluded from export)
+let selected = -1;      // selected point index
+const VIS_CLASS = ["v0", "v1", "v2"];
+
+function dotClass(im) {
+  if (im.declined) return "dot declined";
+  if (im.reviewed) return "dot done";
+  if (im.no_detection) return "dot nodet";
+  return "dot";
+}
+
+async function boot() {
+  DATA = await (await fetch("/api/data")).json();
+  buildList();
+  updateProgress();
+  // Jump to first frame still needing a decision, or frame 0.
+  const firstNew = DATA.images.findIndex(im => !im.reviewed && !im.declined);
+  show(firstNew >= 0 ? firstNew : 0);
+}
+
+function buildList() {
+  const list = $("list");
+  list.innerHTML = "";
+  DATA.images.forEach((im, i) => {
+    const row = document.createElement("div");
+    row.className = "row" + (im.declined ? " declined" : "");
+    row.dataset.i = i;
+    const dot = document.createElement("span");
+    dot.className = dotClass(im);
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = im.file;
+    row.appendChild(dot); row.appendChild(nm);
+    row.onclick = () => show(i);
+    list.appendChild(row);
+  });
+}
+
+function refreshRow(i) {
+  const row = $("list").querySelector(`.row[data-i="${i}"]`);
+  if (!row) return;
+  const im = DATA.images[i];
+  row.querySelector(".dot").className = dotClass(im);
+  row.classList.toggle("declined", !!im.declined);
+}
+
+async function show(i) {
+  if (i === cur) return;
+  await flush();                       // save current frame first if dirty
+  cur = i;
+  selected = -1;
+  const im = DATA.images[i];
+  kps = im.keypoints.map(p => p.slice());
+  dirty = false;
+  declined = !!im.declined;
+
+  $("counter").textContent = `${i + 1}/${DATA.images.length}`;
+  $("fname").textContent = im.file;
+  $("flag").textContent = im.declined
+    ? "✕ declined — excluded from export"
+    : (im.no_detection
+        ? "⚠ MediaPipe found no pose — points parked in centre."
+        : (im.reviewed ? "✓ reviewed" : ""));
+
+  const img = $("frame");
+  img.onload = () => {
+    const svg = $("overlay");
+    svg.setAttribute("viewBox", `0 0 ${im.width} ${im.height}`);
+    draw();
+  };
+  img.src = `/frames/${encodeURIComponent(im.file)}`;
+
+  document.querySelectorAll(".row.active").forEach(r => r.classList.remove("active"));
+  const row = $("list").querySelector(`.row[data-i="${i}"]`);
+  if (row) { row.classList.add("active"); row.scrollIntoView({block: "nearest"}); }
+}
+
+function draw() {
+  const svg = $("overlay");
+  const r = DATA.images[cur].width / 100;   // point radius ~ scales with image
+  svg.innerHTML = "";
+
+  // Bones first so points sit on top.
+  for (const [a, b] of DATA.skeleton) {
+    const pa = kps[a], pb = kps[b];
+    if (pa[2] === 0 || pb[2] === 0) continue;
+    const weak = pa[2] === 1 || pb[2] === 1;
+    const line = el("line", {x1: pa[0], y1: pa[1], x2: pb[0], y2: pb[1],
+      class: "bone" + (weak ? " weak" : "")});
+    svg.appendChild(line);
+  }
+  // Points.
+  kps.forEach((p, idx) => {
+    const c = el("circle", {cx: p[0], cy: p[1], r: r,
+      class: "pt " + VIS_CLASS[p[2]] + (idx === selected ? " sel" : ""),
+      "data-i": idx});
+    c.addEventListener("pointerdown", startDrag);
+    svg.appendChild(c);
+  });
+}
+
+function el(tag, attrs) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+
+// ---- dragging ----
+let drag = null;   // {idx, moved, pointerId}
+function svgPoint(evt) {
+  const svg = $("overlay");
+  const pt = svg.createSVGPoint();
+  pt.x = evt.clientX; pt.y = evt.clientY;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+function startDrag(evt) {
+  evt.preventDefault();
+  const idx = +evt.target.getAttribute("data-i");
+  selected = idx;
+  drag = {idx, moved: false, pointerId: evt.pointerId};
+  evt.target.setPointerCapture(evt.pointerId);
+  evt.target.addEventListener("pointermove", onDrag);
+  evt.target.addEventListener("pointerup", endDrag);
+  evt.target.classList.add("sel");
+}
+function onDrag(evt) {
+  if (!drag) return;
+  const p = svgPoint(evt);
+  kps[drag.idx][0] = Math.round(p.x * 10) / 10;
+  kps[drag.idx][1] = Math.round(p.y * 10) / 10;
+  drag.moved = true;
+  dirty = true;
+  draw();
+}
+function endDrag(evt) {
+  if (!drag) return;
+  // A click without movement = cycle this point's visibility state.
+  if (!drag.moved) {
+    kps[drag.idx][2] = (kps[drag.idx][2] + 1) % 3;
+    dirty = true;
+    draw();
+  }
+  drag = null;
+}
+
+// ---- save / review ----
+async function flush() {
+  if (cur < 0 || !dirty) return;
+  await persist(DATA.images[cur].reviewed, declined);
+}
+async function persist(reviewed, decl) {
+  const res = await fetch("/api/save", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({index: cur, keypoints: kps, reviewed, declined: decl}),
+  });
+  const j = await res.json();
+  DATA.images[cur].keypoints = kps.map(p => p.slice());
+  DATA.images[cur].reviewed = reviewed;
+  DATA.images[cur].declined = decl;
+  DATA.reviewed = j.reviewed;
+  declined = decl;
+  dirty = false;
+  refreshRow(cur);
+  updateProgress();
+}
+function updateProgress() {
+  const done = DATA.images.filter(im => im.reviewed).length;
+  const decl = DATA.images.filter(im => im.declined).length;
+  const total = DATA.images.length;
+  $("progress").textContent = `${done} reviewed · ${decl} declined · ${total} total`;
+  $("barFill").style.width = (total ? ((done + decl) / total * 100) : 0) + "%";
+}
+
+// Next frame that still needs a decision (not reviewed, not declined).
+function nextPending() {
+  return DATA.images.findIndex((im, i) => i > cur && !im.reviewed && !im.declined);
+}
+
+async function markReviewed() {
+  await persist(true, false);   // reviewing a frame clears any prior decline
+  $("flag").textContent = "✓ reviewed";
+  const nxt = nextPending();
+  if (nxt >= 0) show(nxt);
+}
+
+async function decline() {
+  await persist(false, true);   // declining excludes it and clears reviewed
+  $("flag").textContent = "✕ declined — excluded from export";
+  const nxt = nextPending();
+  if (nxt >= 0) show(nxt);
+}
+
+// ---- buttons / keys ----
+$("prev").onclick = () => cur > 0 && show(cur - 1);
+$("next").onclick = () => cur < DATA.images.length - 1 && show(cur + 1);
+$("nextNew").onclick = () => {
+  const nxt = nextPending();
+  show(nxt >= 0 ? nxt : cur);
+};
+$("review").onclick = markReviewed;
+$("decline").onclick = decline;
+$("export").onclick = async () => {
+  await flush();
+  $("export").textContent = "Exporting…";
+  const j = await (await fetch("/api/export", {method: "POST"})).json();
+  $("export").textContent = "Export COCO";
+  alert(`Exported ${j.exported} reviewed frame(s) to:\n${j.path}\n\n` +
+        `images/ + annotations.coco.json — drag the folder into Roboflow, ` +
+        `or point YOLO-Pose at it.`);
+};
+
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.key === "a" || e.key === "ArrowLeft") { e.preventDefault(); cur > 0 && show(cur - 1); }
+  else if (e.key === "d" || e.key === "ArrowRight") { e.preventDefault(); cur < DATA.images.length - 1 && show(cur + 1); }
+  else if (e.key === "r") { e.preventDefault(); markReviewed(); }
+  else if (e.key === "x") { e.preventDefault(); decline(); }
+  else if (e.key === "e" && selected >= 0) {
+    kps[selected][2] = (kps[selected][2] + 1) % 3; dirty = true; draw();
+  }
+});
+window.addEventListener("beforeunload", (e) => {
+  if (dirty) { e.preventDefault(); e.returnValue = ""; }
+});
+
+boot();
+</script>
+</body>
+</html>
