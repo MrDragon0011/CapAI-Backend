@@ -1,4 +1,15 @@
-backend/venv/
-backend/__pycache__/
-backend/pose_landmarker.task
+# This file lists files that shouldn't be tracked by git
+.venv/
+venv/
+# Pose model is auto-downloaded on first boot (see _ensure_model in main.py)
+pose_landmarker.task
+__pycache__/
+*.pyc
 .DS_Store
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.vscode/
+.idea/
