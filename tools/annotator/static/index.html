@@ -72,6 +72,23 @@
   .legend b { color: var(--text); font-weight: 600; }
   .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
   kbd { background:#21262d; border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:11px; }
+  /* ingest screen (shown when the project has no frames yet) */
+  #ingest { flex: 1; display: none; align-items: center; justify-content: center; padding: 24px; }
+  .ingest-card { width: 480px; max-width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 26px; }
+  .ingest-card h2 { margin: 0 0 4px; font-size: 18px; }
+  .ingest-card p { color: var(--muted); margin: 0 0 18px; }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 28px; text-align: center; color: var(--muted); cursor: pointer; transition: border-color .15s, background .15s; }
+  .drop.over { border-color: var(--accent); background: #1f6feb1a; color: var(--text); }
+  .drop b { color: var(--text); }
+  .or { text-align: center; color: var(--muted); margin: 14px 0; font-size: 12px; }
+  .ingest-card input[type=text], .ingest-card input[type=number] {
+    width: 100%; background: #0d1117; border: 1px solid var(--line); border-radius: 6px;
+    color: var(--text); padding: 8px 10px; font-size: 13px;
+  }
+  .field { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+  .field label { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .ingest-actions { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
+  #ingestMsg { color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -89,6 +106,28 @@
   <button id="export" class="primary">Export COCO</button>
 </header>
 <main>
+  <div id="ingest">
+    <div class="ingest-card">
+      <h2>Add footage</h2>
+      <p>Drop a video or paste a link. Frames are extracted and the 33 points
+         auto-placed, then you'll land in the editor.</p>
+      <div class="drop" id="drop">
+        <b>Drop a video here</b><br>or click to choose a file
+        <input type="file" id="file" accept="video/*" hidden />
+      </div>
+      <div class="or">— or —</div>
+      <input type="text" id="url" placeholder="Paste a YouTube / video URL" />
+      <div class="field">
+        <label for="fps">Frames per second</label>
+        <input type="number" id="fps" value="0.5" step="0.1" min="0.1" />
+        <span class="counter">0.5 = one frame every 2s</span>
+      </div>
+      <div class="ingest-actions">
+        <button class="primary" id="ingestGo">Extract &amp; annotate</button>
+        <span id="ingestMsg"></span>
+      </div>
+    </div>
+  </div>
   <div class="stage-wrap">
     <div class="stage" id="stage">
       <img id="frame" alt="" />
@@ -130,8 +169,16 @@ function dotClass(im) {
   return "dot";
 }
 
+function setMode(mode) {  // "ingest" | "editor"
+  $("ingest").style.display = mode === "ingest" ? "flex" : "none";
+  document.querySelector(".stage-wrap").style.display = mode === "editor" ? "flex" : "none";
+  document.querySelector("aside").style.display = mode === "editor" ? "flex" : "none";
+}
+
 async function boot() {
   DATA = await (await fetch("/api/data")).json();
+  if (!DATA.images.length) { setMode("ingest"); return; }  // empty project
+  setMode("editor");
   buildList();
   updateProgress();
   // Jump to first frame still needing a decision, or frame 0.
@@ -343,6 +390,53 @@ document.addEventListener("keydown", (e) => {
 window.addEventListener("beforeunload", (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ""; }
 });
+
+// ---- ingest screen ----
+let chosenFile = null;
+const drop = $("drop"), fileInput = $("file");
+drop.onclick = () => fileInput.click();
+fileInput.onchange = () => {
+  chosenFile = fileInput.files[0] || null;
+  if (chosenFile) {
+    drop.innerHTML = `<b>${chosenFile.name}</b><br>ready to extract`;
+    $("url").value = "";
+  }
+};
+["dragover", "dragenter"].forEach(ev => drop.addEventListener(ev, (e) => {
+  e.preventDefault(); drop.classList.add("over");
+}));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, (e) => {
+  e.preventDefault(); drop.classList.remove("over");
+}));
+drop.addEventListener("drop", (e) => {
+  chosenFile = e.dataTransfer.files[0] || null;
+  if (chosenFile) {
+    drop.innerHTML = `<b>${chosenFile.name}</b><br>ready to extract`;
+    $("url").value = "";
+  }
+});
+
+$("ingestGo").onclick = async () => {
+  const url = $("url").value.trim();
+  if (!chosenFile && !url) { $("ingestMsg").textContent = "Pick a file or paste a URL first."; return; }
+  const fd = new FormData();
+  if (chosenFile) fd.append("video", chosenFile);
+  if (url) fd.append("url", url);
+  fd.append("fps", $("fps").value || "0.5");
+
+  $("ingestGo").disabled = true;
+  $("ingestMsg").textContent = "Extracting frames + running MediaPipe… this can take a minute.";
+  try {
+    const res = await fetch("/api/ingest", {method: "POST", body: fd});
+    const j = await res.json();
+    if (!res.ok) { $("ingestMsg").textContent = j.detail || "Ingest failed."; $("ingestGo").disabled = false; return; }
+    $("ingestMsg").textContent = `Added ${j.added} frames. Opening editor…`;
+    await boot();   // reloads data and switches into the editor
+  } catch (err) {
+    $("ingestMsg").textContent = "Ingest failed: " + err;
+    $("ingestGo").disabled = false;
+  }
+};
 
 boot();
 </script>
