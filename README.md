@@ -69,7 +69,7 @@ system libraries it needs (`libgl1`, `libegl1`, `libgles2`, `libglib2.0-0`).
 `render.yaml` builds from `backend/Dockerfile`. Render auto-deploys on push to
 the connected branch.
 
-CORS is locked to `https://cap-ai.netlify.app` and `http://localhost:8000`.
+CORS is locked to `https://cap-ai.netlify.app` and `http://localhost:8000` (for testing purposes).
 
 ## Roadmap
 
