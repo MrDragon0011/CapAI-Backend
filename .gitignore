@@ -1,4 +1,12 @@
-backend/venv/
-backend/__pycache__/
-backend/pose_landmarker.task
+# This file lists files that shouldn't be tracked by git
+.venv/
+__pycache__/
+*.pyc
 .DS_Store
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.vscode/
+.idea/
