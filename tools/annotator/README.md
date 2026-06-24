@@ -1,6 +1,6 @@
 # CapAI Pose Annotator
 
-A local, four-step pipeline to build a custom water-polo pose dataset:
+A local pipeline to build a custom water-polo pose dataset:
 extract frames → auto-place the 33 MediaPipe points → drag-to-correct in a
 webpage → export a COCO-keypoints dataset.
 
@@ -16,34 +16,45 @@ pip install -r requirements.txt
 # ffmpeg is also needed for frame extraction (mac: brew install ffmpeg)
 ```
 
-## 1. Extract frames
+## The easy path — do everything in the browser
 
-From local videos:
+```bash
+python server.py --project ./myproject
+```
+Open <http://localhost:8000>. Because the project is empty, you get an
+**ingest screen**: drop a video file (or paste a YouTube / video URL), pick a
+frame rate, and click **Extract & annotate**. It runs ffmpeg + MediaPipe and
+drops you straight into the editor. Re-open the same `--project` later and you
+can ingest more footage — already-reviewed frames are preserved, and only the
+new ones get auto-annotated.
+
+`--fps 0.5` (the default in the form) = one frame every 2 seconds. Use
+close-up footage so joints are big enough to place accurately.
+
+That's it — skip to **Correcting them** below. The manual CLI steps are still
+available if you prefer them:
+
+<details>
+<summary>Manual CLI pipeline (optional)</summary>
+
+### 1. Extract frames
 ```bash
 python extract_frames.py --videos ./videos --out ./frames --fps 0.5
+# or:  python extract_frames.py --urls urls.txt --out ./frames --fps 0.5
 ```
-From YouTube URLs (one per line in `urls.txt`):
-```bash
-python extract_frames.py --urls urls.txt --out ./frames --fps 0.5
-```
-`--fps 0.5` = one frame every 2 seconds. Use close-up footage so joints are
-big enough to place accurately.
-
-## 2. Auto-place the 33 points
-
+### 2. Auto-place the 33 points
 ```bash
 python auto_annotate.py --frames ./frames
 ```
-Writes `frames/annotations.json` with every landmark pre-placed and a
-visibility flag per point (visible / occluded / not-labelled). Frames where
-MediaPipe found nobody are flagged so you can spot them in the editor.
-
-## 3. Correct them in the browser
-
+### 3. Open the editor on the resulting file
 ```bash
 python server.py --data ./frames/annotations.json
 ```
-Open <http://localhost:8000>.
+</details>
+
+## Correcting them in the browser
+
+Once frames are loaded, the editor opens automatically.
 
 - **Drag** a point to move it.
 - **Click** a point to cycle its state: green (visible) → orange (underwater /
@@ -57,7 +68,7 @@ Open <http://localhost:8000>.
   This is the manual filter; no CLIP or auto-classifier needed.
 - Edits autosave to `annotations.json`, so you can stop and resume anytime.
 
-## 4. Export
+## Export
 
 Click **Export COCO** (only *reviewed* frames are exported). You get:
 

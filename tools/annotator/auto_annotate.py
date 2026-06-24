@@ -79,6 +79,46 @@ def annotate_frame(pose, path: Path):
             "keypoints": kp, "reviewed": False, "no_detection": False}
 
 
+def annotate_dir(frames_dir, complexity=2, progress=None, only=None) -> dict:
+    """Run MediaPipe over images in frames_dir and return the data dict.
+
+    Pure function — does not write to disk. `progress(done, total)` is called
+    periodically if supplied (the web UI uses it; the CLI passes a printer).
+    `only` is an optional set of filenames to restrict to — used for
+    incremental ingest so already-annotated frames aren't redone.
+    Raises ValueError if there are no images to process.
+    """
+    frames_dir = Path(frames_dir)
+    files = sorted(f for f in frames_dir.iterdir() if f.suffix.lower() in IMG_EXT)
+    if only is not None:
+        files = [f for f in files if f.name in only]
+    if not files:
+        raise ValueError(f"No images found in {frames_dir}")
+
+    images = []
+    detected = 0
+    with mp_pose.Pose(static_image_mode=True,
+                      model_complexity=complexity,
+                      min_detection_confidence=0.3) as pose:
+        for i, f in enumerate(files, 1):
+            entry = annotate_frame(pose, f)
+            if entry is None:
+                continue
+            images.append(entry)
+            if not entry["no_detection"]:
+                detected += 1
+            if progress and (i % 25 == 0 or i == len(files)):
+                progress(i, len(files))
+
+    return {
+        "keypoint_names": KEYPOINT_NAMES,
+        "skeleton": SKELETON,
+        "frames_dir": str(frames_dir.resolve()),
+        "images": images,
+        "_detected": detected,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description="Auto-place 33 pose points per frame.")
     ap.add_argument("--frames", required=True, help="folder of extracted frames")
@@ -92,35 +132,17 @@ def main():
         raise SystemExit(f"Not a folder: {frames_dir}")
     out_path = Path(args.out) if args.out else frames_dir / "annotations.json"
 
-    files = sorted(f for f in frames_dir.iterdir() if f.suffix.lower() in IMG_EXT)
-    if not files:
-        raise SystemExit(f"No images found in {frames_dir}")
+    try:
+        data = annotate_dir(frames_dir, args.complexity,
+                            progress=lambda d, t: print(f"  {d}/{t} frames"))
+    except ValueError as exc:
+        raise SystemExit(str(exc))
 
-    images = []
-    detected = 0
-    with mp_pose.Pose(static_image_mode=True,
-                      model_complexity=args.complexity,
-                      min_detection_confidence=0.3) as pose:
-        for i, f in enumerate(files, 1):
-            entry = annotate_frame(pose, f)
-            if entry is None:
-                continue
-            images.append(entry)
-            if not entry["no_detection"]:
-                detected += 1
-            if i % 50 == 0 or i == len(files):
-                print(f"  {i}/{len(files)} frames")
-
-    data = {
-        "keypoint_names": KEYPOINT_NAMES,
-        "skeleton": SKELETON,
-        "frames_dir": str(frames_dir.resolve()),
-        "images": images,
-    }
+    detected = data.pop("_detected")
     out_path.write_text(json.dumps(data, indent=1))
     print(f"\nWrote {out_path}")
-    print(f"  {len(images)} frames, pose found in {detected}, "
-          f"{len(images) - detected} need manual placement")
+    print(f"  {len(data['images'])} frames, pose found in {detected}, "
+          f"{len(data['images']) - detected} need manual placement")
     print("Next: python server.py --data", out_path)
 
 
