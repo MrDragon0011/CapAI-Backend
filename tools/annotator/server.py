@@ -69,6 +69,11 @@ class SaveBody(BaseModel):
     declined: bool = False
 
 
+@app.get("/favicon.ico")
+def favicon():
+    return FileResponse(HERE / "static" / "favicon.ico")
+
+
 @app.get("/")
 def index():
     return FileResponse(HERE / "static" / "index.html")
