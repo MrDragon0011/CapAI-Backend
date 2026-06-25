@@ -70,8 +70,9 @@ class SaveBody(BaseModel):
 
 
 @app.get("/favicon.ico")
+@app.get("/favicon.png")
 def favicon():
-    return FileResponse(HERE / "static" / "favicon.ico")
+    return FileResponse(HERE / "static" / "favicon.png", media_type="image/png")
 
 
 @app.get("/")
