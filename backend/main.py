@@ -1,11 +1,18 @@
 import asyncio
 import logging
 import math
+import os
 import shutil
 import tempfile
 import time
 import urllib.request
 from pathlib import Path
+
+# Guard OpenCV's image decoder against decompression bombs: it refuses to decode
+# any image whose pixel count exceeds this ceiling (returning an empty Mat
+# instead of allocating gigabytes of RAM). MUST be set before cv2 is imported.
+# Mirrors the post-decode MAX_IMAGE_PIXELS check below — defense in depth.
+os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", str(50_000_000))
 
 import cv2
 import numpy as np
@@ -40,12 +47,15 @@ app.add_middleware(
 def _client_ip(request: Request) -> str:
     """Real client IP behind HF Spaces' reverse proxy.
 
-    request.client.host is the proxy, so prefer the first hop in
-    X-Forwarded-For. Falls back to the socket peer for direct/local calls.
+    The trusted proxy appends the connecting IP to the RIGHT of X-Forwarded-For,
+    so the LAST entry is the hop our proxy added. A client can spoof earlier
+    entries by sending its own X-Forwarded-For, but not the rightmost hop —
+    taking the first hop instead would let an attacker rotate fake IPs to bypass
+    rate limiting. Falls back to the socket peer for direct/local calls.
     """
     xff = request.headers.get("x-forwarded-for")
     if xff:
-        return xff.split(",")[0].strip()
+        return xff.split(",")[-1].strip()
     return get_remote_address(request)
 
 
