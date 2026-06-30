@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import logging
 import math
 import os
@@ -81,6 +82,29 @@ async def _unhandled_handler(request: Request, exc: Exception):
         status_code=500,
         content={"ok": False, "error": "Internal server error."},
     )
+
+
+# Accepted API keys, comma-separated in the API_KEYS env var
+# (e.g. "master-abc123,friend-def456"). /analyze requires the X-API-Key header to
+# match one of them. Mint a key by adding a random string to the list; revoke it
+# by removing it — no database needed. The trusted gateway injects the website's
+# master key server-side, so normal site users never see one. Leave API_KEYS
+# unset (the default) to disable the check entirely for local dev.
+API_KEYS = frozenset(
+    k.strip() for k in os.environ.get("API_KEYS", "").split(",") if k.strip()
+)
+
+
+def _authorized(request: Request) -> bool:
+    """True if no keys are configured (open) or the request carries a valid one.
+
+    Constant-time compare against every key so a caller can't probe which prefix
+    matched via response timing.
+    """
+    if not API_KEYS:
+        return True
+    provided = request.headers.get("x-api-key", "")
+    return any(hmac.compare_digest(provided, key) for key in API_KEYS)
 
 
 MAX_BYTES = 200 * 1024 * 1024
@@ -800,6 +824,11 @@ async def analyze(
     footage: UploadFile = File(...),
     consent: str = Form(...),
 ):
+    # Gate on the API key first (only enforced when API_KEYS is configured) so an
+    # unauthorized caller is rejected before any upload or model work happens.
+    if not _authorized(request):
+        return _error("Invalid or missing API key.", 401)
+
     if consent != "accepted":
         return _error("Consent was not accepted.")
 
