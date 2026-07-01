@@ -8,7 +8,7 @@
 
 Open http://localhost:8000. If the project is empty you get an ingest screen
 — drop a video file or paste a YouTube URL and it extracts frames and
-auto-places the 33 points for you, then drops into the editor. Drag points to
+auto-places the 17 points for you, then drops into the editor. Drag points to
 fix them, click a point to cycle visibility (visible -> underwater -> off),
 Decline bad frames, and Export when done. Export writes a COCO-keypoints
 dataset to <project>/export/.
