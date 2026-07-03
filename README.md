@@ -1,10 +1,22 @@
-# CapAI Backend
+# CapAI
 
-FastAPI service for water polo biomechanical analysis. Detects the 33-point
-MediaPipe Pose skeleton and computes per-frame joint kinematics for uploaded
-images or video.
+I made CapAI because I felt like I never got enough feedback on my game.
+Water polo is a pretty small sport compared to something like basketball or
+soccer, so there's just not much out there to help you improve, especially
+since half of what you're doing is underwater where nobody can see it anyway.
 
-## Endpoints
+CapAI looks at a photo or video of you playing and shows your skeleton, your
+joint angles (elbows, knees), your shoulder tilt, and where the ball is.
+
+The frontend lives at [cap-ai.netlify.app](https://cap-ai.netlify.app). This
+repo is the backend that does the analysis, plus the tools I'm using to train
+better water-polo-specific models.
+
+## How it works
+
+The backend is a FastAPI service. You send it footage, it sends back JSON —
+skeleton landmarks, joint angles, ball positions. All the drawing happens in
+the frontend.
 
 ### `GET /health`
 Returns `{"status": "ok"}` whenever the service is awake.
@@ -40,19 +52,41 @@ Response:
 Invalid input returns HTTP 400 with `{"ok": false, "error": "..."}`.
 
 Angles use the shoulder–elbow–wrist and hip–knee–ankle triplets plus the
-shoulder-line tilt from horizontal, with normalized x scaled by the image
-aspect ratio so angles reflect true geometry. Visibility tiers: tracked
-(>= 0.75), partial (0.30–0.74), estimated (< 0.30). The `balls` array holds
-detected ball candidates as normalized center `x`/`y` and radius `r` (fraction
-of the longer image side); it is empty when no ball is found. The `others`
-array holds up to 4 non-primary athlete skeletons (landmarks only, no angles)
-for whole-scene rendering. Uploaded footage is processed in a temp directory
-and deleted immediately after analysis.
+shoulder-line tilt from horizontal. Visibility tiers: tracked (>= 0.75),
+partial (0.30–0.74), estimated (< 0.30) — that last tier matters a lot in
+water polo, because your legs are underwater and the model is basically
+guessing. CapAI is honest about that instead of showing you confident numbers
+for joints it can't actually see.
 
-This service returns JSON only — all skeleton/ball rendering lives in the
-frontend (CapAI-Frontend, deployed to cap-ai.netlify.app).
+The `balls` array holds the detected ball (a YOLOv8 model I trained on water
+polo footage, with a color-based fallback). The `others` array holds up to 4
+other players in frame so the whole scene can be rendered. Uploaded footage is
+processed in a temp directory and deleted immediately after analysis — nothing
+is stored.
 
-## Run locally
+## Why pool footage is hard (and what I did about it)
+
+Off-the-shelf pose models are trained on land sports. Pools break them:
+glare off the water, splash that looks like limbs, and legs that just aren't
+visible. The backend does a bunch of work to compensate — deglaring and
+contrast enhancement tuned for pool footage, a tiled fallback pass so distant
+players in wide shots still get detected, a crop-and-refine pass on the main
+athlete, and locking onto the most prominent player instead of whoever the
+model finds first.
+
+The longer-term fix is a model that's actually trained on water polo. That's
+in progress — see `tools/`:
+
+- **`tools/annotator/`** — a browser-based annotation editor I built for
+  labeling pose keypoints on real pool frames. It auto-places points, then you
+  drag to fix them and mark which joints are underwater.
+- **`tools/synthgen/`** — a Blender script that generates synthetic training
+  data: a rigged swimmer in randomized shooting and eggbeater poses, with
+  randomized cameras, lighting, cap/suit colors, and a waterline that
+  determines per-joint visibility. Renders images with YOLO-pose labels,
+  no hand-labeling needed.
+
+## Run it locally
 
 ```
 cd backend
@@ -62,39 +96,30 @@ uvicorn main:app --reload --port 8000
 
 The pose model (`pose_landmarker.task`) downloads automatically on first start.
 
-## Deploy (Render, Docker)
+## Deploy
 
-The service ships a `Dockerfile` so the MediaPipe Tasks runtime gets the GL
-system libraries it needs (`libgl1`, `libegl1`, `libgles2`, `libglib2.0-0`).
-`render.yaml` builds from `backend/Dockerfile`. Render auto-deploys on push to
-the connected branch.
+The service ships a `Dockerfile` so the MediaPipe runtime gets the GL system
+libraries it needs (`libgl1`, `libegl1`, `libgles2`, `libglib2.0-0`). It runs
+on a Hugging Face Space (Docker SDK, port 7860); `render.yaml` is also included
+if you'd rather deploy on Render.
 
-CORS is locked to `https://cap-ai.netlify.app` and `http://localhost:8000` (for testing purposes).
+CORS is locked to `https://cap-ai.netlify.app` and `http://localhost:8000`
+(for testing purposes). The `/analyze` endpoint is rate-limited per IP and can
+require API keys (set the `API_KEYS` env var) so the backend isn't an open
+free-compute faucet.
 
 ## Roadmap
 
-### Server-side super-resolution (planned, GPU tier required)
+- **Water-polo-trained pose model** — fine-tuning YOLO pose on the dataset
+  coming out of the annotator + synthetic generator, to replace the generic
+  MediaPipe model that was never trained on swimmers.
+- **Server-side super-resolution** (needs a GPU tier) — upscaling low-res
+  footage with Real-ESRGAN before analysis. Not viable on the current
+  CPU-only free tier (~2–5 s per 1080p frame on CPU would blow the request
+  timeout on video). For now, image enhancement happens client-side in the
+  frontend via transformers.js.
 
-Currently the backend returns JSON only — no image bytes. All rendering happens
-client-side in the frontend. Super-resolution (upscaling low-res source images
-via Real-ESRGAN or a similar model) was evaluated but is not viable on the
-current CPU-only free tier:
+---
 
-- Real-ESRGAN 2× on a 1080p frame takes ~2–5 s on CPU; video (up to 60
-  frames) would blow the 90 s request timeout entirely.
-- Returning upscaled frames as base64 adds 8–15 MB per frame to the response.
-
-Once the backend moves to a GPU-backed instance (e.g. Hugging Face Spaces Pro,
-Render GPU, or a self-hosted machine with an NVIDIA card), server-side SR
-becomes practical:
-
-1. After `_analyze_image` / `_analyze_video` runs, upscale each source frame
-   with Real-ESRGAN (2× recommended for speed/quality balance).
-2. Encode the upscaled frame as JPEG base64 and add it to the frame payload
-   (`"image_b64": "..."`).
-3. Update `source.width` / `source.height` to the upscaled dimensions.
-4. The frontend swaps its locally-held source image for the server-returned
-   one and renders the canvas at the new resolution.
-
-In the meantime, image quality improvement is handled client-side in the
-frontend via browser-based SR (transformers.js).
+I built this because I wanted it to exist. If you play water polo and try it
+out, let me know what you think.
