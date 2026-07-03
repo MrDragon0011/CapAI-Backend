@@ -121,5 +121,4 @@ free-compute faucet.
 
 ---
 
-I built this because I wanted it to exist. If you play water polo and try it
-out, let me know what you think.
+I built this because I wanted more feedback. If you play water polo, try it out and give me some of your own.
