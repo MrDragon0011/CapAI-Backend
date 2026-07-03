@@ -1,21 +1,17 @@
 # CapAI
 
-Hi, I'm Nathaniel. I play water polo.
+I play water polo, and honestly there's just not a lot of good feedback for it.
+For most sports you can film yourself and find tons of videos breaking down
+your form. Water polo doesn't really have that. A lot of what you're doing is
+underwater where nobody can even see it, and unless your coach happens to be
+watching you specifically at that exact moment, you don't really know what
+you're doing wrong.
 
-If you play a sport like basketball or soccer, you can film yourself, slow the
-footage down, and find a thousand videos breaking down exactly what your elbow
-or your feet should be doing. Water polo isn't like that. It's a niche sport —
-most of your body is underwater, half the technique is invisible from the pool
-deck, and unless you're lucky enough to have a great coach watching your every
-rep, real feedback basically doesn't exist outside of practice.
+So I made CapAI to fix that for myself.
 
-I got tired of that. So I built CapAI.
-
-CapAI takes a photo or video of a water polo player and gives you actual
-biomechanical feedback: a full pose skeleton overlaid on your body, joint
-angles for your elbows and knees frame by frame, shoulder tilt, and even where
-the ball is. It's the film-study tool I wished I had — for a sport that never
-gets one.
+You give it a photo or video and it shows you your skeleton, your joint
+angles (elbows, knees), which way your shoulders are tilted, and where the
+ball is. Basically the film study I always wanted but could never get.
 
 The frontend lives at [cap-ai.netlify.app](https://cap-ai.netlify.app). This
 repo is the backend that does the analysis, plus the tools I'm using to train
@@ -130,5 +126,5 @@ free-compute faucet.
 
 ---
 
-Built by a student who wanted better feedback than "looked good from the deck."
-If you play water polo and try it, I'd genuinely love to hear what you think.
+I built this because I wanted it to exist. If you play water polo and try it
+out, let me know what you think.
