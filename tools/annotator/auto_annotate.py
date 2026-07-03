@@ -29,6 +29,8 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 
+from upscale import Upscaler
+
 mp_pose = mp.solutions.pose
 
 # The 17 standard COCO keypoint names, in COCO index order.
@@ -65,12 +67,17 @@ def _vflag(visibility: float) -> int:
     return 0
 
 
-def annotate_frame(pose, path: Path):
+def annotate_frame(pose, path: Path, upscaler=None):
     img = cv2.imread(str(path))
     if img is None:
         return None
     h, w = img.shape[:2]
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # Super-resolve only the pixels fed to the detector. MediaPipe returns
+    # normalized coords, so we keep the ORIGINAL w/h below and the points still
+    # land on the real frame — no rescaling needed.
+    if upscaler is not None:
+        rgb = upscaler(rgb)
     res = pose.process(rgb)
 
     if not res.pose_landmarks:
@@ -92,13 +99,16 @@ def annotate_frame(pose, path: Path):
             "keypoints": kp, "reviewed": False, "no_detection": False}
 
 
-def annotate_dir(frames_dir, complexity=2, progress=None, only=None) -> dict:
+def annotate_dir(frames_dir, complexity=2, progress=None, only=None,
+                 upscale=False, min_side=640) -> dict:
     """Run MediaPipe over images in frames_dir and return the data dict.
 
     Pure function — does not write to disk. `progress(done, total)` is called
     periodically if supplied (the web UI uses it; the CLI passes a printer).
     `only` is an optional set of filenames to restrict to — used for
     incremental ingest so already-annotated frames aren't redone.
+    `upscale` super-resolves low-res frames (shorter side < `min_side`) before
+    detection — helps a lot on blurry/compressed footage.
     Raises ValueError if there are no images to process.
     """
     frames_dir = Path(frames_dir)
@@ -108,13 +118,15 @@ def annotate_dir(frames_dir, complexity=2, progress=None, only=None) -> dict:
     if not files:
         raise ValueError(f"No images found in {frames_dir}")
 
+    upscaler = Upscaler(min_side=min_side) if upscale else None
+
     images = []
     detected = 0
     with mp_pose.Pose(static_image_mode=True,
                       model_complexity=complexity,
                       min_detection_confidence=0.3) as pose:
         for i, f in enumerate(files, 1):
-            entry = annotate_frame(pose, f)
+            entry = annotate_frame(pose, f, upscaler)
             if entry is None:
                 continue
             images.append(entry)
@@ -138,6 +150,12 @@ def main():
     ap.add_argument("--out", help="annotations.json path (default: <frames>/annotations.json)")
     ap.add_argument("--complexity", type=int, default=2, choices=[0, 1, 2],
                     help="MediaPipe model_complexity (2 = most accurate, default)")
+    ap.add_argument("--upscale", action="store_true",
+                    help="super-resolve low-res frames before detection "
+                         "(helps on blurry/compressed footage)")
+    ap.add_argument("--min-side", type=int, default=640,
+                    help="only upscale frames whose shorter side is below this "
+                         "(default 640)")
     args = ap.parse_args()
 
     frames_dir = Path(args.frames)
@@ -147,7 +165,8 @@ def main():
 
     try:
         data = annotate_dir(frames_dir, args.complexity,
-                            progress=lambda d, t: print(f"  {d}/{t} frames"))
+                            progress=lambda d, t: print(f"  {d}/{t} frames"),
+                            upscale=args.upscale, min_side=args.min_side)
     except ValueError as exc:
         raise SystemExit(str(exc))
 
