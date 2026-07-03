@@ -1,17 +1,12 @@
 # CapAI
 
-I play water polo, and honestly there's just not a lot of good feedback for it.
-For most sports you can film yourself and find tons of videos breaking down
-your form. Water polo doesn't really have that. A lot of what you're doing is
-underwater where nobody can even see it, and unless your coach happens to be
-watching you specifically at that exact moment, you don't really know what
-you're doing wrong.
+I made CapAI because I felt like I never got enough feedback on my game.
+Water polo is a pretty small sport compared to something like basketball or
+soccer, so there's just not much out there to help you improve, especially
+since half of what you're doing is underwater where nobody can see it anyway.
 
-So I made CapAI to fix that for myself.
-
-You give it a photo or video and it shows you your skeleton, your joint
-angles (elbows, knees), which way your shoulders are tilted, and where the
-ball is. Basically the film study I always wanted but could never get.
+CapAI looks at a photo or video of you playing and shows your skeleton, your
+joint angles (elbows, knees), your shoulder tilt, and where the ball is.
 
 The frontend lives at [cap-ai.netlify.app](https://cap-ai.netlify.app). This
 repo is the backend that does the analysis, plus the tools I'm using to train
