@@ -243,7 +243,9 @@ async def ingest(video: UploadFile = File(None), url: str = Form(""),
     if not new_names:
         raise HTTPException(400, "No frames were extracted from that source.")
 
-    added = annotate_dir(FRAMES_DIR, only=new_names)
+    # Upscale low-res frames before detection — browser ingest is exactly where
+    # phone clips and compressed footage show up, so default it on.
+    added = annotate_dir(FRAMES_DIR, only=new_names, upscale=True)
     added.pop("_detected", None)
     DATA["images"].extend(added["images"])
     _save()
