@@ -165,8 +165,9 @@ NUM_POSES = 5
 # Pad the person crop before the high-res refinement pass (fraction of bbox)
 CROP_PAD = 0.25
 # How many of the non-primary athletes to also return per frame (context only,
-# no kinematics) so the UI can draw every player in the scene.
-MAX_OTHER_PLAYERS = 4
+# no kinematics) so the UI can draw every player in the scene. Set high enough
+# to cover a full-pool wide shot — YOLO routinely finds a dozen+ players.
+MAX_OTHER_PLAYERS = 24
 # Ball temporal carry-forward: even a trained detector drops the ball on
 # motion-blur / occlusion frames. Rather than flicker the marker out, carry the
 # last known position forward for a few frames so it reads as continuous.
@@ -238,6 +239,15 @@ def _ensure_model() -> bool:
 def _startup():
     logger.info("[startup] pose engine: %s", POSE_ENGINE)
     _ensure_model()
+    # Warm the YOLO pose model at boot so the first user upload doesn't pay the
+    # weight download + load cost inside the request (that was the 504/timeout).
+    if POSE_ENGINE == "yolo":
+        try:
+            ready = pose_yolo.warm()
+            logger.info("[startup] yolo pose model %s",
+                        "ready" if ready else "FAILED to load")
+        except Exception as exc:
+            logger.error("[startup] yolo warm failed: %s", exc)
     # Ball model is loaded lazily on first request to avoid OOM at startup
 
 
