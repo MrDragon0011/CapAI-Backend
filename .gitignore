@@ -5,6 +5,8 @@ venv/
 pose_landmarker.task
 # Super-resolution weights are auto-downloaded on first use (see upscale.py)
 .sr_models/
+# YOLO26-pose weights auto-download on first use when POSE_ENGINE=yolo
+yolo26m-pose.pt
 __pycache__/
 *.pyc
 .DS_Store

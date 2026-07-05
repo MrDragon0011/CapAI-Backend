@@ -18,3 +18,10 @@ folder live at the Space root (Dockerfile, main.py, requirements.txt,
 ball_detector.pt, this README.md).
 
 `POST /analyze` and `GET /health` — see the main repo README for the API contract.
+
+## Pose engine
+
+Set `POSE_ENGINE=yolo` in the Space's variables to run the local YOLO26-pose
+engine (the water-polo workflow model, run here with Ultralytics — no Roboflow
+at runtime) instead of MediaPipe. Weights download on first use; the payload is
+unchanged. Leave it unset for the default MediaPipe engine.
