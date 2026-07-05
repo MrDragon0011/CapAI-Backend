@@ -66,6 +66,12 @@ def get_pose_model():
     return _pose_model or None
 
 
+def warm() -> bool:
+    """Load the model now so the first user request doesn't pay the download +
+    load cost inside its (short) timeout window. Returns True if it's ready."""
+    return get_pose_model() is not None
+
+
 def _person_to_landmarks(kpts_xy, kpts_conf, width: int, height: int):
     """Scatter 17 COCO keypoints into a 33-slot BlazePose-shaped landmark list.
 
@@ -82,8 +88,11 @@ def _person_to_landmarks(kpts_xy, kpts_conf, width: int, height: int):
         ny = float(kpts_xy[coco_i][1]) / height
         lm[slot].x = nx
         lm[slot].y = ny
-        lm[slot].visibility = round(conf, 4)
+        # Drop keypoints the model isn't confident about (visibility 0 -> the
+        # frontend skips them), so uncertain/underwater joints aren't drawn as
+        # stray points instead of silently trusting a bad guess.
         if conf >= KPT_CONF:
+            lm[slot].visibility = round(conf, 4)
             xs.append(nx)
             ys.append(ny)
 
