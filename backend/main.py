@@ -236,6 +236,7 @@ def _ensure_model() -> bool:
 
 @app.on_event("startup")
 def _startup():
+    logger.info("[startup] pose engine: %s", POSE_ENGINE)
     _ensure_model()
     # Ball model is loaded lazily on first request to avoid OOM at startup
 
@@ -895,7 +896,7 @@ def _build_response(filename, content_type, width, height, frames):
 
 @app.get("/")
 def root():
-    return {"service": "CapAI Backend", "status": "ok"}
+    return {"service": "CapAI Backend", "status": "ok", "pose_engine": POSE_ENGINE}
 
 
 @app.get("/health")
