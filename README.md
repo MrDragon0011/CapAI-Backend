@@ -96,6 +96,21 @@ uvicorn main:app --reload --port 8000
 
 The pose model (`pose_landmarker.task`) downloads automatically on first start.
 
+### Pose engine
+
+By default the backend uses MediaPipe (33-point BlazePose). There's also an
+optional local **YOLO26-pose** engine — the same model my Roboflow "Water Polo
+Pose Estimation" workflow runs, but executed on the server with Ultralytics so
+nothing calls out to Roboflow at runtime. Turn it on with:
+
+```
+POSE_ENGINE=yolo
+```
+
+The `yolo26m-pose.pt` weights download automatically on first use. It emits the
+17 COCO keypoints mapped into the same 33-slot payload, so the API contract and
+the frontend don't change — you can flip the env var back to MediaPipe anytime.
+
 ## Deploy
 
 The service ships a `Dockerfile` so the MediaPipe runtime gets the GL system
@@ -110,9 +125,10 @@ free-compute faucet.
 
 ## Roadmap
 
-- **Water-polo-trained pose model** — fine-tuning YOLO pose on the dataset
-  coming out of the annotator + synthetic generator, to replace the generic
-  MediaPipe model that was never trained on swimmers.
+- **Water-polo-trained pose model** — the optional YOLO26-pose engine
+  (`POSE_ENGINE=yolo`) is the first step; next is fine-tuning it on the dataset
+  coming out of the annotator + synthetic generator so it's actually trained on
+  swimmers instead of the generic COCO-pretrained weights.
 - **Server-side super-resolution** (needs a GPU tier) — upscaling low-res
   footage with Real-ESRGAN before analysis. Not viable on the current
   CPU-only free tier (~2–5 s per 1080p frame on CPU would blow the request

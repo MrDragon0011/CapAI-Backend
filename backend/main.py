@@ -27,7 +27,14 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+import pose_yolo
+
 logger = logging.getLogger("uvicorn.error")
+
+# Pose engine: "mediapipe" (default, 33-point BlazePose) or "yolo" (local
+# YOLO26-pose, the water-polo workflow model run without Roboflow). The YOLO
+# path emits the same 33-slot payload, so switching is a safe env-var flip.
+POSE_ENGINE = os.environ.get("POSE_ENGINE", "mediapipe").lower()
 
 app = FastAPI(title="CapAI Backend")
 
@@ -693,6 +700,28 @@ def _video_landmarker():
     return mp_vision.PoseLandmarker.create_from_options(options)
 
 
+def _analyze_image_yolo(image, width, height, filename, content_type):
+    """Single-image analysis via the local YOLO26-pose engine.
+
+    YOLO detects every athlete in one pass (no crop-refine or tiling needed),
+    so we just pick the most prominent one, keep the rest as context, and reuse
+    the shared frame/response builders. Ball detection runs on the original
+    frame, then the head-suppression filter drops caps misread as balls.
+    """
+    poses = pose_yolo.detect_poses(image, width, height)
+    best = None
+    others = []
+    if poses:
+        best_i = _select_best_pose(poses)
+        others = _others_payload(poses, best_i)
+        best = poses[best_i]
+    balls = pose_yolo.suppress_head_balls(
+        _detect_ball(image, width, height), poses, width, height
+    )
+    frame = _frame_result(best, width, height, 0, image, balls=balls, others=others)
+    return _build_response(filename, content_type, width, height, [frame])
+
+
 def _analyze_image(path, filename, content_type):
     image = cv2.imread(path)
     if image is None:
@@ -700,6 +729,9 @@ def _analyze_image(path, filename, content_type):
     height, width = image.shape[:2]
     if width * height > MAX_IMAGE_PIXELS:
         raise ValueError("Image resolution exceeds the 50 MP limit.")
+
+    if POSE_ENGINE == "yolo":
+        return _analyze_image_yolo(image, width, height, filename, content_type)
 
     frames = []
     with _image_landmarker() as landmarker:
@@ -725,7 +757,8 @@ def _analyze_image(path, filename, content_type):
     return _build_response(filename, content_type, width, height, frames)
 
 
-def _analyze_video(path, filename, content_type):
+def _open_video(path):
+    """Open a clip and validate its resolution/length. Returns (cap, fps, w, h)."""
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError("Could not open the uploaded video.")
@@ -741,7 +774,60 @@ def _analyze_video(path, filename, content_type):
     if fps > 0 and frame_count > 0 and (frame_count / fps) > MAX_VIDEO_SECONDS:
         cap.release()
         raise ValueError("Video is longer than the 120 second limit.")
+    return cap, fps, width, height
 
+
+def _analyze_video_yolo(path, filename, content_type):
+    """Video analysis via the local YOLO26-pose engine.
+
+    Same frame sampling, ball carry-forward and payload as the MediaPipe path,
+    but pose comes from a single YOLO pass per frame (no landmarker/refiner).
+    """
+    cap, fps, width, height = _open_video(path)
+    sample_every = max(1, int(round(fps / SAMPLE_FPS)))
+
+    frames = []
+    frame_index = 0
+    ball_tracker = _BallTracker()
+
+    while len(frames) < MAX_FRAMES:
+        if not cap.grab():
+            break
+        if frame_index % sample_every != 0:
+            frame_index += 1
+            continue
+        ok, image = cap.retrieve()
+        if not ok:
+            break
+        if width == 0 or height == 0:
+            height, width = image.shape[:2]
+
+        poses = pose_yolo.detect_poses(image, width, height)
+        best = None
+        others = []
+        if poses:
+            best_i = _select_best_pose(poses)
+            others = _others_payload(poses, best_i)
+            best = poses[best_i]
+        raw_balls = pose_yolo.suppress_head_balls(
+            _detect_ball(image, width, height), poses, width, height
+        )
+        balls = ball_tracker.update(raw_balls)
+        frames.append(
+            _frame_result(best, width, height, frame_index, image,
+                          balls=balls, others=others)
+        )
+        frame_index += 1
+
+    cap.release()
+    return _build_response(filename, content_type, width, height, frames)
+
+
+def _analyze_video(path, filename, content_type):
+    if POSE_ENGINE == "yolo":
+        return _analyze_video_yolo(path, filename, content_type)
+
+    cap, fps, width, height = _open_video(path)
     sample_every = max(1, int(round(fps / SAMPLE_FPS)))
 
     frames = []
