@@ -36,11 +36,11 @@ HEAD_SLOTS = [COCO_TO_BLAZEPOSE[i] for i in range(5)]
 
 WEIGHTS = os.environ.get("YOLO_POSE_WEIGHTS", "yolo26m-pose.pt")
 # Person-box confidence: low so partially-occluded swimmers (half underwater,
-# back-facing) still get detected. Keypoint confidence: HIGH so we only place a
-# joint the model actually sees — occluded/underwater guesses are dropped rather
-# than drawn as points floating where a limb isn't visible.
+# back-facing) still get detected. Keypoint confidence: also permissive, so
+# joints the model has a weak-but-real read on (partly submerged limbs) still
+# get placed rather than dropped entirely.
 POSE_CONF = float(os.environ.get("YOLO_POSE_CONF", "0.25"))   # min person-box confidence
-KPT_CONF = float(os.environ.get("YOLO_KPT_CONF", "0.5"))      # min keypoint conf to place a joint
+KPT_CONF = float(os.environ.get("YOLO_KPT_CONF", "0.15"))     # min keypoint conf to place a joint
 
 _pose_model = None  # lazy singleton; False = load failed
 
