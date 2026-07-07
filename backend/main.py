@@ -38,11 +38,14 @@ logger = logging.getLogger("uvicorn.error")
 POSE_ENGINE = os.environ.get("POSE_ENGINE", "mediapipe").lower()
 
 # Response format: "native" (default, CapAI frames/landmarks contract) or
-# "roboflow" (Roboflow-workflow-shaped: predictions.predictions, player_count,
-# ball_predictions.predictions, ball_count, ...). The roboflow format always
-# runs the local YOLO26-pose model, so the backend is a drop-in replacement for
-# the Roboflow serverless endpoint — no Roboflow at runtime.
+# "detections" (flat predictions.predictions / player_count / ball_predictions
+# / ball_count shape — the same LAYOUT a Roboflow workflow emits, so a frontend
+# written against that shape can consume it unchanged). This is purely the JSON
+# layout: detection still runs 100% locally on the YOLO26-pose + ball models.
+# NOTHING calls Roboflow at runtime — no API key, no credits, no usage limits.
+# "roboflow" is accepted as a legacy alias for "detections".
 RESPONSE_FORMAT = os.environ.get("RESPONSE_FORMAT", "native").lower()
+_DETECTIONS_FORMAT = RESPONSE_FORMAT in ("detections", "roboflow")
 
 app = FastAPI(title="CapAI Backend")
 
@@ -249,7 +252,7 @@ def _startup():
     _ensure_model()
     # Warm the YOLO pose model at boot so the first user upload doesn't pay the
     # weight download + load cost inside the request (that was the 504/timeout).
-    if POSE_ENGINE == "yolo" or RESPONSE_FORMAT == "roboflow":
+    if POSE_ENGINE == "yolo" or _DETECTIONS_FORMAT:
         try:
             ready = pose_yolo.warm()
             logger.info("[startup] yolo pose model %s",
@@ -912,9 +915,11 @@ def _build_response(filename, content_type, width, height, frames):
     }
 
 
-# --- Roboflow-shaped response (RESPONSE_FORMAT=roboflow) -------------------
-# A drop-in match for the "Water Polo Pose Estimation" Roboflow workflow output,
-# so a frontend written against Roboflow can point at this backend unchanged.
+# --- Flat detections response (RESPONSE_FORMAT=detections) -----------------
+# Matches the JSON LAYOUT that the "Water Polo Pose Estimation" Roboflow
+# workflow emits, so a frontend written against that shape can point at this
+# backend unchanged. Detection runs entirely on the local YOLO26-pose + ball
+# models — nothing calls Roboflow at runtime.
 
 def _ball_detections_detailed(bgr_image, width: int, height: int):
     """Ball detections in Roboflow shape: pixel centre x/y, width/height,
@@ -960,7 +965,7 @@ def _ball_detections_detailed(bgr_image, width: int, height: int):
 
 
 def _roboflow_payload(image, width, height):
-    """Build one image's Roboflow-shaped result."""
+    """Build one image's flat-detections result."""
     players = pose_yolo.detect_players_detailed(image, width, height)
     balls = pose_yolo.suppress_head_balls_px(
         _ball_detections_detailed(image, width, height), players
@@ -1093,7 +1098,7 @@ async def analyze(
         is_video = kind == "video"
 
         loop = asyncio.get_running_loop()
-        if RESPONSE_FORMAT == "roboflow":
+        if _DETECTIONS_FORMAT:
             worker = _analyze_video_roboflow if is_video else _analyze_image_roboflow
         else:
             worker = _analyze_video if is_video else _analyze_image
