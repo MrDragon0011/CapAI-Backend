@@ -21,6 +21,7 @@ annotator's BLAZEPOSE_TO_COCO mapping. Downstream code needs no changes and the
 import logging
 import math
 import os
+import uuid
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -33,6 +34,19 @@ BLAZEPOSE_POINTS = 33
 FILLER_SLOTS = [s for s in range(BLAZEPOSE_POINTS) if s not in set(COCO_TO_BLAZEPOSE)]
 # COCO head keypoints (nose, eyes, ears) -> BlazePose slots, for ball suppression.
 HEAD_SLOTS = [COCO_TO_BLAZEPOSE[i] for i in range(5)]
+
+# The 17 COCO keypoint names in model order — used for the Roboflow-shaped
+# response (detect_players_detailed), which labels each joint by name.
+COCO_KEYPOINT_NAMES = [
+    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist", "left_hip", "right_hip",
+    "left_knee", "right_knee", "left_ankle", "right_ankle",
+]
+# Roboflow-style consumers ignore keypoints below this; we pre-filter so the
+# returned array only carries joints worth drawing.
+ROBOFLOW_KPT_MIN = 0.05
+HEAD_KEYPOINT_NAMES = frozenset(COCO_KEYPOINT_NAMES[:5])  # nose, eyes, ears
 
 WEIGHTS = os.environ.get("YOLO_POSE_WEIGHTS", "yolo26m-pose.pt")
 # Person-box confidence: low so partially-occluded swimmers (half underwater,
@@ -131,6 +145,102 @@ def detect_poses(bgr_image, width: int, height: int):
     for person in data:
         poses.append(_person_to_landmarks(person[:, :2], person[:, 2], width, height))
     return poses
+
+
+def detect_players_detailed(bgr_image, width: int, height: int):
+    """Run YOLO26-pose and return Roboflow-shaped player detections.
+
+    Each player is a dict with the person bounding box (centre x/y + width/height
+    in ORIGINAL-image pixels), detection confidence, a stable detection_id, and a
+    `keypoints` array of the named COCO joints. Keypoints at/below
+    ROBOFLOW_KPT_MIN or parked at the origin are dropped so only real joints are
+    returned. Returns [] on any failure (fail-open).
+    """
+    model = get_pose_model()
+    if model is None:
+        return []
+    try:
+        res = model.predict(bgr_image, conf=POSE_CONF, verbose=False)[0]
+    except Exception as exc:
+        logger.error("[pose-yolo] inference failed: %s", exc)
+        return []
+
+    kp = getattr(res, "keypoints", None)
+    if kp is None or kp.data is None or len(kp.data) == 0:
+        return []
+    kdata = kp.data.cpu().numpy()  # (num_people, 17, 3) -> x_px, y_px, conf
+
+    boxes = getattr(res, "boxes", None)
+    xyxy = bconf = None
+    if boxes is not None and len(boxes) == len(kdata):
+        xyxy = boxes.xyxy.cpu().numpy()
+        bconf = boxes.conf.cpu().numpy()
+
+    players = []
+    for i, person in enumerate(kdata):
+        keypoints = []
+        for j, (px, py, conf) in enumerate(person):
+            conf = float(conf)
+            px, py = float(px), float(py)
+            if conf <= ROBOFLOW_KPT_MIN or (px < 1.0 and py < 1.0):
+                continue  # unseen / parked-at-origin joint
+            keypoints.append({
+                "class": COCO_KEYPOINT_NAMES[j],
+                "class_id": j,
+                "confidence": round(conf, 4),
+                "x": round(px, 1),
+                "y": round(py, 1),
+            })
+
+        if xyxy is not None:
+            x0, y0, x1, y1 = (float(v) for v in xyxy[i])
+            box_conf = float(bconf[i])
+        elif keypoints:  # no box tensor — derive one from the visible joints
+            xs = [k["x"] for k in keypoints]
+            ys = [k["y"] for k in keypoints]
+            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+            box_conf = 0.5
+        else:
+            continue
+
+        players.append({
+            "x": round((x0 + x1) / 2, 1),
+            "y": round((y0 + y1) / 2, 1),
+            "width": round(x1 - x0, 1),
+            "height": round(y1 - y0, 1),
+            "confidence": round(box_conf, 4),
+            "class": "person",
+            "class_id": 0,
+            "detection_id": str(uuid.uuid4()),
+            "keypoints": keypoints,
+        })
+    return players
+
+
+def suppress_head_balls_px(balls, players):
+    """Head-suppression for Roboflow-shaped detections (pixel space).
+
+    `balls` and `players` are the detailed dicts (pixel centre x/y, width/height).
+    Drops any ball whose centre lands on a player's head keypoint (a round cap
+    misread as a ball). Returns the kept balls.
+    """
+    if not balls or not players:
+        return balls
+    heads = [
+        (k["x"], k["y"])
+        for p in players for k in p["keypoints"]
+        if k["class"] in HEAD_KEYPOINT_NAMES
+    ]
+    if not heads:
+        return balls
+    kept = []
+    for b in balls:
+        br = max(b["width"], b["height"]) / 2.0
+        if any(math.hypot(b["x"] - hx, b["y"] - hy) <= max(28.0, br * 1.35)
+               for hx, hy in heads):
+            continue  # sitting on a head — drop it
+        kept.append(b)
+    return kept
 
 
 def suppress_head_balls(balls, poses, width: int, height: int):
