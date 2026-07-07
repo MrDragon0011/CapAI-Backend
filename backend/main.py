@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 
 # Guard OpenCV's image decoder against decompression bombs: it refuses to decode
@@ -35,6 +36,13 @@ logger = logging.getLogger("uvicorn.error")
 # YOLO26-pose, the water-polo workflow model run without Roboflow). The YOLO
 # path emits the same 33-slot payload, so switching is a safe env-var flip.
 POSE_ENGINE = os.environ.get("POSE_ENGINE", "mediapipe").lower()
+
+# Response format: "native" (default, CapAI frames/landmarks contract) or
+# "roboflow" (Roboflow-workflow-shaped: predictions.predictions, player_count,
+# ball_predictions.predictions, ball_count, ...). The roboflow format always
+# runs the local YOLO26-pose model, so the backend is a drop-in replacement for
+# the Roboflow serverless endpoint — no Roboflow at runtime.
+RESPONSE_FORMAT = os.environ.get("RESPONSE_FORMAT", "native").lower()
 
 app = FastAPI(title="CapAI Backend")
 
@@ -241,7 +249,7 @@ def _startup():
     _ensure_model()
     # Warm the YOLO pose model at boot so the first user upload doesn't pay the
     # weight download + load cost inside the request (that was the 504/timeout).
-    if POSE_ENGINE == "yolo":
+    if POSE_ENGINE == "yolo" or RESPONSE_FORMAT == "roboflow":
         try:
             ready = pose_yolo.warm()
             logger.info("[startup] yolo pose model %s",
@@ -904,9 +912,119 @@ def _build_response(filename, content_type, width, height, frames):
     }
 
 
+# --- Roboflow-shaped response (RESPONSE_FORMAT=roboflow) -------------------
+# A drop-in match for the "Water Polo Pose Estimation" Roboflow workflow output,
+# so a frontend written against Roboflow can point at this backend unchanged.
+
+def _ball_detections_detailed(bgr_image, width: int, height: int):
+    """Ball detections in Roboflow shape: pixel centre x/y, width/height,
+    confidence, class, detection_id. Prefers the trained YOLO ball model; falls
+    back to the HSV heuristic (synthesizing a box + nominal confidence)."""
+    model = _get_ball_model()
+    if model is not None:
+        try:
+            res = model.predict(bgr_image, conf=BALL_CONF, verbose=False)[0]
+            boxes = getattr(res, "boxes", None)
+            if boxes is not None and len(boxes) > 0:
+                xyxy = boxes.xyxy.cpu().numpy()
+                confs = boxes.conf.cpu().numpy()
+                order = confs.argsort()[::-1][:BALL_MAX_RESULTS]
+                dets = []
+                for i in order:
+                    x0, y0, x1, y1 = (float(v) for v in xyxy[i])
+                    dets.append({
+                        "x": round((x0 + x1) / 2, 1),
+                        "y": round((y0 + y1) / 2, 1),
+                        "width": round(x1 - x0, 1),
+                        "height": round(y1 - y0, 1),
+                        "confidence": round(float(confs[i]), 4),
+                        "class": "sports ball",
+                        "class_id": 0,
+                        "detection_id": str(uuid.uuid4()),
+                    })
+                return dets
+        except Exception as exc:
+            logger.error("[ball] detailed YOLO failed (%s); using HSV.", exc)
+
+    dets = []
+    for b in _detect_ball_hsv(bgr_image, width, height):
+        cx, cy = b["x"] * width, b["y"] * height
+        d = b["r"] * max(width, height) * 2.0
+        dets.append({
+            "x": round(cx, 1), "y": round(cy, 1),
+            "width": round(d, 1), "height": round(d, 1),
+            "confidence": 0.5, "class": "sports ball", "class_id": 0,
+            "detection_id": str(uuid.uuid4()),
+        })
+    return dets
+
+
+def _roboflow_payload(image, width, height):
+    """Build one image's Roboflow-shaped result."""
+    players = pose_yolo.detect_players_detailed(image, width, height)
+    balls = pose_yolo.suppress_head_balls_px(
+        _ball_detections_detailed(image, width, height), players
+    )
+    img_meta = {"width": width, "height": height}
+    return {
+        "output_image": None,  # rendering is opt-in; consumers draw from coords
+        "predictions": {"image": img_meta, "predictions": players},
+        "player_count": len(players),
+        "ball_predictions": {"image": img_meta, "predictions": balls},
+        "ball_count": len(balls),
+        "vision_events_status": "ok",
+        "vision_events_message": (
+            f"Detected {len(players)} player(s) and {len(balls)} ball(s)."
+        ),
+    }
+
+
+def _analyze_image_roboflow(path, filename, content_type):
+    image = cv2.imread(path)
+    if image is None:
+        raise ValueError("Could not decode the uploaded image.")
+    height, width = image.shape[:2]
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError("Image resolution exceeds the 50 MP limit.")
+    return _roboflow_payload(image, width, height)
+
+
+def _analyze_video_roboflow(path, filename, content_type):
+    cap, fps, width, height = _open_video(path)
+    sample_every = max(1, int(round(fps / SAMPLE_FPS)))
+
+    frames = []
+    frame_index = 0
+    while len(frames) < MAX_FRAMES:
+        if not cap.grab():
+            break
+        if frame_index % sample_every != 0:
+            frame_index += 1
+            continue
+        ok, image = cap.retrieve()
+        if not ok:
+            break
+        if width == 0 or height == 0:
+            height, width = image.shape[:2]
+        payload = _roboflow_payload(image, width, height)
+        payload["index"] = frame_index
+        frames.append(payload)
+        frame_index += 1
+
+    cap.release()
+    return {
+        "source": {
+            "filename": filename, "type": content_type,
+            "width": width, "height": height, "frames_analyzed": len(frames),
+        },
+        "frames": frames,
+    }
+
+
 @app.get("/")
 def root():
-    return {"service": "CapAI Backend", "status": "ok", "pose_engine": POSE_ENGINE}
+    return {"service": "CapAI Backend", "status": "ok",
+            "pose_engine": POSE_ENGINE, "response_format": RESPONSE_FORMAT}
 
 
 @app.get("/health")
@@ -975,7 +1093,10 @@ async def analyze(
         is_video = kind == "video"
 
         loop = asyncio.get_running_loop()
-        worker = _analyze_video if is_video else _analyze_image
+        if RESPONSE_FORMAT == "roboflow":
+            worker = _analyze_video_roboflow if is_video else _analyze_image_roboflow
+        else:
+            worker = _analyze_video if is_video else _analyze_image
         content_type = footage.content_type or ""
         try:
             async with _analysis_sem:
