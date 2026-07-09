@@ -160,7 +160,11 @@ BALL_MAX_RESULTS = 1          # only the single best candidate
 
 # Trained YOLOv8 ball detector (preferred over the HSV colour heuristic).
 # Falls back to HSV automatically if the weights or ultralytics are missing.
+# Weights live on a Hugging Face Model repo (not in git — keeps this repo free
+# of large binaries) and are cached locally after the first download, same
+# pattern as pose_landmarker.task and yolo26m-pose.pt.
 BALL_MODEL_PATH = Path(__file__).parent / "ball_detector.pt"
+BALL_MODEL_URL = os.environ.get("BALL_MODEL_URL", "")
 BALL_CONF = 0.25              # min confidence for a YOLO ball detection
 _ball_model = None            # lazily loaded singleton; False = load failed
 
@@ -373,11 +377,32 @@ def _compute_kinematics(lm, aspect: float):
     return angles, visibility
 
 
+def _ensure_ball_model_file() -> bool:
+    """Download ball_detector.pt from BALL_MODEL_URL if not already cached.
+
+    Returns True if the file exists locally afterward (already present or the
+    download succeeded). No-op (returns current existence) if BALL_MODEL_URL
+    isn't set — lets a locally-committed weights file keep working too.
+    """
+    if BALL_MODEL_PATH.exists():
+        return True
+    if not BALL_MODEL_URL:
+        return False
+    try:
+        logger.info("[ball] Downloading ball_detector.pt from %s ...", BALL_MODEL_URL)
+        urllib.request.urlretrieve(BALL_MODEL_URL, BALL_MODEL_PATH)
+        logger.info("[ball] Ball model saved to %s", BALL_MODEL_PATH)
+        return True
+    except Exception as exc:
+        logger.error("[ball] Failed to download ball model: %s", exc)
+        return False
+
+
 def _get_ball_model():
     """Lazily load the trained YOLO ball detector. Returns the model or None."""
     global _ball_model
     if _ball_model is None:
-        if not BALL_MODEL_PATH.exists():
+        if not _ensure_ball_model_file():
             logger.info("[ball] No ball_detector.pt; using HSV fallback.")
             _ball_model = False
         else:
