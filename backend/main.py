@@ -383,6 +383,10 @@ def _ensure_ball_model_file() -> bool:
     Returns True if the file exists locally afterward (already present or the
     download succeeded). No-op (returns current existence) if BALL_MODEL_URL
     isn't set — lets a locally-committed weights file keep working too.
+
+    Sends an Authorization header when HF_TOKEN is set, since a private
+    Hugging Face Model repo's resolve URL 404s without one (urlretrieve alone
+    can't attach headers, so this uses urlopen + a manual Request instead).
     """
     if BALL_MODEL_PATH.exists():
         return True
@@ -390,11 +394,17 @@ def _ensure_ball_model_file() -> bool:
         return False
     try:
         logger.info("[ball] Downloading ball_detector.pt from %s ...", BALL_MODEL_URL)
-        urllib.request.urlretrieve(BALL_MODEL_URL, BALL_MODEL_PATH)
+        req = urllib.request.Request(BALL_MODEL_URL)
+        hf_token = os.environ.get("HF_TOKEN", "")
+        if hf_token:
+            req.add_header("Authorization", f"Bearer {hf_token}")
+        with urllib.request.urlopen(req) as resp, open(BALL_MODEL_PATH, "wb") as out:
+            shutil.copyfileobj(resp, out)
         logger.info("[ball] Ball model saved to %s", BALL_MODEL_PATH)
         return True
     except Exception as exc:
         logger.error("[ball] Failed to download ball model: %s", exc)
+        BALL_MODEL_PATH.unlink(missing_ok=True)  # don't leave a partial/empty file
         return False
 
 
