@@ -236,12 +236,18 @@ def _preprocess(bgr_image):
 def _ensure_model() -> bool:
     if MODEL_PATH.exists():
         return True
+    # Download to a temp file and rename into place only on success, so an
+    # interrupted download can't leave a partial file at MODEL_PATH that the
+    # exists() check above would treat as a valid model forever after.
+    tmp_path = MODEL_PATH.with_name(MODEL_PATH.name + ".tmp")
     try:
         logger.info("[startup] Downloading pose_landmarker.task ...")
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        urllib.request.urlretrieve(MODEL_URL, tmp_path)
+        tmp_path.replace(MODEL_PATH)
         logger.info(f"[startup] Pose model saved to {MODEL_PATH}")
         return True
     except Exception as exc:
+        tmp_path.unlink(missing_ok=True)
         logger.error(f"[startup] Failed to download pose model: {exc}")
         return False
 
