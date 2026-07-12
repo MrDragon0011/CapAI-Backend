@@ -822,7 +822,12 @@ def _analyze_video_yolo(path, filename, content_type):
         if not ok:
             break
         if width == 0 or height == 0:
+            # Dims weren't in the container metadata, so the _open_video check
+            # never ran — re-apply the resolution cap to the real frame size.
             height, width = image.shape[:2]
+            if max(width, height) > MAX_VIDEO_DIM:
+                cap.release()
+                raise ValueError("Video resolution exceeds the 4K limit.")
 
         poses = pose_yolo.detect_poses(image, width, height)
         best = None
@@ -867,7 +872,12 @@ def _analyze_video(path, filename, content_type):
             if not ok:
                 break
             if width == 0 or height == 0:
+                # Dims weren't in the container metadata, so the _open_video
+                # check never ran — re-apply the cap to the real frame size.
                 height, width = image.shape[:2]
+                if max(width, height) > MAX_VIDEO_DIM:
+                    cap.release()
+                    raise ValueError("Video resolution exceeds the 4K limit.")
             enhanced = _preprocess(image)  # for pose detection only
             timestamp_ms = int((frame_index / fps) * 1000)
             result = landmarker.detect_for_video(_mp_rgb(enhanced), timestamp_ms)
@@ -1010,7 +1020,12 @@ def _analyze_video_roboflow(path, filename, content_type):
         if not ok:
             break
         if width == 0 or height == 0:
+            # Dims weren't in the container metadata, so the _open_video check
+            # never ran — re-apply the resolution cap to the real frame size.
             height, width = image.shape[:2]
+            if max(width, height) > MAX_VIDEO_DIM:
+                cap.release()
+                raise ValueError("Video resolution exceeds the 4K limit.")
         payload = _roboflow_payload(image, width, height)
         payload["index"] = frame_index
         frames.append(payload)
