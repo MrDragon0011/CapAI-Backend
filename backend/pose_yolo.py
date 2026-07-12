@@ -21,6 +21,7 @@ annotator's BLAZEPOSE_TO_COCO mapping. Downstream code needs no changes and the
 import logging
 import math
 import os
+import threading
 import uuid
 
 logger = logging.getLogger("uvicorn.error")
@@ -57,6 +58,7 @@ POSE_CONF = float(os.environ.get("YOLO_POSE_CONF", "0.25"))   # min person-box c
 KPT_CONF = float(os.environ.get("YOLO_KPT_CONF", "0.15"))     # min keypoint conf to place a joint
 
 _pose_model = None  # lazy singleton; False = load failed
+_pose_model_lock = threading.Lock()
 
 
 class _Landmark:
@@ -71,16 +73,23 @@ class _Landmark:
 
 
 def get_pose_model():
-    """Lazily load YOLO26m-pose. Returns the model or None if it can't load."""
+    """Lazily load YOLO26m-pose. Returns the model or None if it can't load.
+
+    Analyses run on executor threads (up to two at once), so the first-load is
+    guarded by a lock — otherwise two requests can both see None and load the
+    model twice, doubling the memory spike (and the weight download) at warm-up.
+    """
     global _pose_model
     if _pose_model is None:
-        try:
-            from ultralytics import YOLO
-            _pose_model = YOLO(WEIGHTS)  # weights auto-download on first use
-            logger.info("[pose-yolo] Loaded %s", WEIGHTS)
-        except Exception as exc:
-            logger.error("[pose-yolo] Failed to load %s: %s", WEIGHTS, exc)
-            _pose_model = False
+        with _pose_model_lock:
+            if _pose_model is None:
+                try:
+                    from ultralytics import YOLO
+                    _pose_model = YOLO(WEIGHTS)  # weights auto-download on first use
+                    logger.info("[pose-yolo] Loaded %s", WEIGHTS)
+                except Exception as exc:
+                    logger.error("[pose-yolo] Failed to load %s: %s", WEIGHTS, exc)
+                    _pose_model = False
     return _pose_model or None
 
 

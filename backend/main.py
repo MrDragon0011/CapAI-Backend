@@ -5,6 +5,7 @@ import math
 import os
 import shutil
 import tempfile
+import threading
 import time
 import urllib.request
 import uuid
@@ -163,6 +164,7 @@ BALL_MAX_RESULTS = 1          # only the single best candidate
 BALL_MODEL_PATH = Path(__file__).parent / "ball_detector.pt"
 BALL_CONF = 0.25              # min confidence for a YOLO ball detection
 _ball_model = None            # lazily loaded singleton; False = load failed
+_ball_model_lock = threading.Lock()
 
 ANGLE_JOINTS = {
     "elbow_l": (11, 13, 15),
@@ -374,20 +376,29 @@ def _compute_kinematics(lm, aspect: float):
 
 
 def _get_ball_model():
-    """Lazily load the trained YOLO ball detector. Returns the model or None."""
+    """Lazily load the trained YOLO ball detector. Returns the model or None.
+
+    Analyses run on executor threads (up to MAX_CONCURRENT_ANALYSES at once),
+    so the first-load is guarded by a lock — otherwise two requests can both
+    see None and load the model twice, doubling the memory spike at warm-up.
+    """
     global _ball_model
     if _ball_model is None:
-        if not BALL_MODEL_PATH.exists():
-            logger.info("[ball] No ball_detector.pt; using HSV fallback.")
-            _ball_model = False
-        else:
-            try:
-                from ultralytics import YOLO
-                _ball_model = YOLO(str(BALL_MODEL_PATH))
-                logger.info("[ball] Loaded YOLO ball detector from %s", BALL_MODEL_PATH)
-            except Exception as exc:
-                logger.error("[ball] Failed to load YOLO model (%s); using HSV.", exc)
-                _ball_model = False
+        with _ball_model_lock:
+            if _ball_model is None:
+                if not BALL_MODEL_PATH.exists():
+                    logger.info("[ball] No ball_detector.pt; using HSV fallback.")
+                    _ball_model = False
+                else:
+                    try:
+                        from ultralytics import YOLO
+                        _ball_model = YOLO(str(BALL_MODEL_PATH))
+                        logger.info("[ball] Loaded YOLO ball detector from %s",
+                                    BALL_MODEL_PATH)
+                    except Exception as exc:
+                        logger.error("[ball] Failed to load YOLO model (%s); using HSV.",
+                                     exc)
+                        _ball_model = False
     return _ball_model or None
 
 
