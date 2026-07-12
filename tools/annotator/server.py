@@ -136,8 +136,11 @@ def _bbox(kps):
 
 @app.post("/api/export")
 def export():
-    """Write a COCO-keypoints dataset to ./export (images/ + annotations.coco.json)."""
-    out_dir = HERE / "export"
+    """Write a COCO-keypoints dataset to <project>/export (images/ +
+    annotations.coco.json), next to the project's annotations.json — NOT into
+    the annotator's source folder, where two projects would overwrite each
+    other's exports."""
+    out_dir = DATA_PATH.parent / "export"
     img_out = out_dir / "images"
     img_out.mkdir(parents=True, exist_ok=True)
 
