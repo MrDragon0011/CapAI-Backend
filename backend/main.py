@@ -299,7 +299,7 @@ def _sniff_kind(path: str):
         return "image"                                   # bmp
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "image"                                   # webp
-    if head[:2] in (b"II", b"MM"):
+    if head[:4] in (b"II*\x00", b"MM\x00*"):
         return "image"                                   # tiff
 
     # Videos
