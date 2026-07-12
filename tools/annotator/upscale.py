@@ -53,10 +53,16 @@ class Upscaler:
             return None
         path = MODEL_DIR / f"FSRCNN_x{scale}.pb"
         if not path.is_file():
+            # Download to a temp file and rename on success so an interrupted
+            # download can't leave a partial .pb that is_file() then treats as
+            # the cached model forever (silently degrading to Lanczos).
+            tmp = path.with_name(path.name + ".tmp")
             try:
                 MODEL_DIR.mkdir(exist_ok=True)
-                urllib.request.urlretrieve(FSRCNN_URL.format(scale=scale), path)
+                urllib.request.urlretrieve(FSRCNN_URL.format(scale=scale), tmp)
+                tmp.replace(path)
             except Exception:
+                tmp.unlink(missing_ok=True)
                 return None  # offline / blocked — caller falls back to Lanczos
         try:
             sr.readModel(str(path))
